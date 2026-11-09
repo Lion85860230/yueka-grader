@@ -449,6 +449,103 @@
       return r.className ? r.no + ',' + r.name + ',' + r.className : r.no + ',' + r.name;
     }).join('\n');
   }
+  function importTip(msg, warn) {
+    var el = $('importTip');
+    el.textContent = msg;
+    el.className = 'import-tip' + (warn ? ' warn' : '');
+  }
+  function normRow(cells, iNo, iName, iCls) {
+    function g(i) { var v = cells[i]; return v == null ? '' : String(v).trim(); }
+    var no = g(iNo);
+    if (!no) return null;
+    return { no: no, name: g(iName), className: g(iCls) };
+  }
+  /* 表格数组（Excel 首个工作表）→ 名单行 */
+  function rowsFromTable(arr) {
+    var iNo = 0, iName = 1, iCls = 2, start = 0;
+    for (var r = 0; r < Math.min(arr.length, 10); r += 1) {
+      var row = (arr[r] || []).map(function (c) { return c == null ? '' : String(c).trim(); });
+      var a = -1, b = -1, c2 = -1;
+      row.forEach(function (cell, i) {
+        if (/学号|考号|考生|编号|id/i.test(cell) && a < 0) a = i;
+        else if (/姓名|名字|学生/.test(cell) && b < 0) b = i;
+        else if (/班级|class/i.test(cell) && c2 < 0) c2 = i;
+      });
+      if (a >= 0 || b >= 0) {
+        if (a < 0) a = b === 0 ? 1 : 0;
+        if (b < 0) b = a === 0 ? 1 : 0;
+        iNo = a; iName = b; iCls = c2; start = r + 1;
+        break;
+      }
+    }
+    var out = [];
+    for (var i = start; i < arr.length; i += 1) {
+      var n = normRow(arr[i] || [], iNo, iName >= 0 ? iName : 1, iCls >= 0 ? iCls : 2);
+      if (n) out.push(n);
+    }
+    return out;
+  }
+  /* 文本行 → 名单行（逗号/制表符/空格分隔） */
+  function rowsFromText(text) {
+    var lines = text.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+    var out = [];
+    lines.forEach(function (line) {
+      var cells = line.split(/[,，\t]+|\s{1,}/).map(function (c) { return c.trim(); }).filter(Boolean);
+      if (!cells.length) return;
+      if (cells[0].indexOf('学号') >= 0 || cells.some(function (c) { return c === '姓名'; })) return; // 表头
+      out.push({ no: cells[0] || '', name: cells[1] || '', className: cells[2] || '' });
+    });
+    return out.filter(function (r) { return r.no; });
+  }
+  function mergeRoster(rows) {
+    rows = rows.filter(function (r) { return r.no; });
+    if (!rows.length) { importTip('没有解析到有效数据（需要「学号」列或第一列为学号）', true); return; }
+    var map = {};
+    var order = [];
+    roster().forEach(function (r) {
+      if (!(r.no in map)) { map[r.no] = r; order.push(r.no); }
+    });
+    var added = 0, updated = 0;
+    rows.forEach(function (r) {
+      r.no = String(r.no).trim();
+      r.name = (r.name || '').trim();
+      r.className = (r.className || '').trim();
+      if (r.no in map) updated += 1; else added += 1;
+      map[r.no] = r;
+      if (order.indexOf(r.no) < 0) order.push(r.no);
+    });
+    var list = order.map(function (no) { return map[no]; });
+    LS.set(K.roster, list);
+    renderRoster();
+    importTip('✓ 导入完成：新增 ' + added + ' 人，更新 ' + updated + ' 人，当前共 ' + list.length + ' 人');
+  }
+  function importRosterFile(file) {
+    importTip('正在读取 ' + file.name + ' …');
+    var ext = file.name.toLowerCase().split('.').pop();
+    var reader = new FileReader();
+    reader.onload = function (ev) {
+      try {
+        var buf = new Uint8Array(ev.target.result);
+        if (ext === 'xlsx' || ext === 'xls') {
+          if (!window.XLSX) { importTip('Excel 解析组件未加载，请刷新页面重试', true); return; }
+          var wb = window.XLSX.read(buf, { type: 'array' });
+          var ws = wb.Sheets[wb.SheetNames[0]];
+          var arr = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+          mergeRoster(rowsFromTable(arr));
+        } else {
+          var utf8 = new TextDecoder('utf-8').decode(buf);
+          var text = utf8.indexOf('\uFFFD') === -1 ? utf8 : (function () {
+            try { return new TextDecoder('gbk').decode(buf); } catch (e2) { return utf8; }
+          })();
+          mergeRoster(rowsFromText(text));
+        }
+      } catch (err) {
+        importTip('解析失败：' + ((err && err.message) || err), true);
+      }
+    };
+    reader.onerror = function () { importTip('文件读取失败', true); };
+    reader.readAsArrayBuffer(file);
+  }
 
   /* ================= 成绩与错题率 ================= */
   function renderRecords() {
@@ -599,8 +696,16 @@
   $('btnClearAnswers').onclick = function () {
     if (confirm('确定清空全部标准答案？')) { LS.set(K.answers, {}); renderAnswers(); }
   };
-  $('btnRoster').onclick = function () { renderRoster(); showView('roster'); };
+  $('btnRoster').onclick = function () { renderRoster(); importTip(''); showView('roster'); };
   $('btnRosterBack').onclick = function () { showView('home'); };
+  $('rosterFile').onchange = function (e) {
+    var f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (f) importRosterFile(f);
+  };
+  $('btnClearRoster').onclick = function () {
+    if (confirm('确定清空全部学生名单？')) { LS.set(K.roster, []); renderRoster(); importTip('已清空'); }
+  };
   $('btnSaveRoster').onclick = function () {
     var lines = $('rosterText').value.split(/\n+/).map(function (l) { return l.trim(); }).filter(Boolean);
     var list = lines.map(function (l) {
