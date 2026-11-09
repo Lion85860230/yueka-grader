@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1016">
+<title>阅卡 · 答题卡批阅</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ==================== 首页 ==================== -->
+<div id="view-home" class="view">
+  <header class="top">
+    <div class="brand">阅卡</div>
+    <div class="brand-sub">摄像头扫一扫 · 成绩自动播报</div>
+  </header>
+
+  <div class="card exam-card">
+    <div class="exam-title">英语答题卡 · 选择题批阅</div>
+    <div class="exam-sub">听力 1-20（每题1.5） · 阅读 21-40（每题2.5） · 完形 41-55（每题1） · 满分 <b>95</b></div>
+    <div class="exam-warn" id="answersWarn"></div>
+  </div>
+
+  <div class="menu">
+    <button class="btn btn-primary btn-big" id="btnScan">📷 开始扫描</button>
+    <button class="btn btn-soft" id="btnPhoto">🖼 拍照批阅</button>
+    <button class="btn btn-soft" id="btnRecords">📊 成绩与错题率</button>
+    <div class="menu-row">
+      <button class="btn btn-ghost grow" id="btnAnswers">✏️ 标准答案</button>
+      <button class="btn btn-ghost grow" id="btnRoster">👥 学生名单</button>
+    </div>
+  </div>
+
+  <div class="foot-note">数据保存在本机浏览器，可随时导出 CSV · 换手机前请先导出</div>
+</div>
+
+<!-- ==================== 实时扫描 ==================== -->
+<div id="view-scan" class="view view-scan" hidden>
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+
+  <div class="hud-top">
+    <button class="hud-chip" id="btnScanClose">✕</button>
+    <div class="hud-title">将答题卡放入画面</div>
+    <button class="hud-chip" id="btnMute">播报开</button>
+  </div>
+
+  <div class="hud-status-wrap">
+    <div class="hud-status lv-idle" id="scanStatus">正在启动相机…</div>
+    <div class="hud-dbg" id="scanDbg">等待画面帧</div>
+  </div>
+
+  <div class="result-float" id="resultFloat" hidden>
+    <div class="rf-score" id="rfScore">0<span class="rf-full">/95</span></div>
+    <div class="rf-name" id="rfName"></div>
+    <div class="rf-meta" id="rfMeta"></div>
+    <div class="rf-tag" id="rfTag">✓ 成绩已记录</div>
+  </div>
+
+  <div class="hud-bottom">
+    <button class="hud-btn" id="btnAlbum">相册</button>
+    <button class="hud-btn" id="btnStopScan">停止</button>
+  </div>
+</div>
+
+<!-- ==================== 拍照批阅 ==================== -->
+<div id="view-photo" class="view dark" hidden>
+  <header class="nav">
+    <button class="nav-btn" id="btnPhotoBack">← 返回</button>
+    <div class="nav-title">拍照批阅</div>
+    <span class="nav-btn"></span>
+  </header>
+  <div class="photo-body" id="photoBody">
+    <div class="hint-block">点击下方按钮拍摄答题卡，或从相册选择。<br>拍清楚整个版面，光线均匀效果最佳。</div>
+    <div id="photoResult" hidden></div>
+  </div>
+  <div class="footer-bar">
+    <label class="btn btn-primary grow center" for="fileInput">📸 拍摄 / 选照片</label>
+  </div>
+</div>
+
+<!-- ==================== 标准答案 ==================== -->
+<div id="view-answers" class="view dark" hidden>
+  <header class="nav">
+    <button class="nav-btn" id="btnAnswersBack">← 返回</button>
+    <div class="nav-title">标准答案</div>
+    <span class="nav-btn" id="answersCount"></span>
+  </header>
+  <div class="page-body">
+    <div class="hint-block">点题目循环切换答案：A → B → C → … → 空。听力 A-C，阅读 A-D，七选五 A-G。</div>
+    <div class="chips" id="answerChips"></div>
+    <button class="btn btn-ghost" id="btnClearAnswers" style="margin-top:16px">清空全部答案</button>
+  </div>
+</div>
+
+<!-- ==================== 学生名单 ==================== -->
+<div id="view-roster" class="view dark" hidden>
+  <header class="nav">
+    <button class="nav-btn" id="btnRosterBack">← 返回</button>
+    <div class="nav-title">学生名单</div>
+    <span class="nav-btn"></span>
+  </header>
+  <div class="page-body">
+    <div class="hint-block">每行一个学生，格式：学号,姓名（逗号或空格分隔），例如：<br>20417,张三<br>20418 李四<br>可选：学号,姓名,班级</div>
+    <textarea id="rosterText" rows="14" placeholder="20417,张三&#10;20418,李四"></textarea>
+    <button class="btn btn-primary" id="btnSaveRoster" style="margin-top:12px">保存名单</button>
+  </div>
+</div>
+
+<!-- ==================== 成绩与错题率 ==================== -->
+<div id="view-records" class="view dark" hidden>
+  <header class="nav">
+    <button class="nav-btn" id="btnRecordsBack">← 返回</button>
+    <div class="nav-title">成绩与错题率</div>
+    <span class="nav-btn"></span>
+  </header>
+  <div class="page-body" id="recordsBody"></div>
+  <div class="footer-bar">
+    <button class="btn btn-ghost" id="btnClearRecords">清空</button>
+    <button class="btn btn-primary grow" id="btnExportCsv">导出 CSV</button>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="image/*" capture="environment" hidden>
+
+<script src="js/template.js"></script>
+<script src="js/omr.js"></script>
+<script src="js/exam.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
