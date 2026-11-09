@@ -482,6 +482,44 @@
       .sort(function (a, b) { return b.pct - a.pct; })
       .slice(0, 12);
 
+    /* 逐题作答分布：每题正确答案 + 各选项选择占比 */
+    var distHtml = '';
+    NUMS.forEach(function (no) {
+      var ans = exam.answers[no];
+      if (!ans) return;
+      var opts = LETTERS.slice(0, EXAM.optionsOf(no));
+      var dist = {};
+      opts.forEach(function (L) { dist[L] = 0; });
+      var blankCnt = 0;
+      recs.forEach(function (r) {
+        var mine = r.choices && r.choices[no];
+        if (mine && mine in dist) dist[mine] += 1;
+        else blankCnt += 1;
+      });
+      var wrongN = 0;
+      opts.forEach(function (L) { if (L !== ans) wrongN += dist[L]; });
+      var wrongPct = recs.length ? Math.round(wrongN * 100 / recs.length) : 0;
+      distHtml += '<div class="qdist">' +
+        '<div class="qdist-head"><span class="qdist-no">第' + no + '题</span>' +
+        '<span class="qdist-ans">正确答案 ' + ans + '</span>' +
+        '<span class="qdist-wrong">错误率 ' + wrongPct + '%</span></div>';
+      opts.forEach(function (L) {
+        var cnt = dist[L];
+        var pct = recs.length ? Math.round(cnt * 100 / recs.length) : 0;
+        var cls = L === ans ? 'ok' : (cnt ? 'bad' : 'zero');
+        distHtml += '<div class="qdist-row ' + cls + '"><span class="qdist-L">' + L + (L === ans ? ' ✓' : '') + '</span>' +
+          '<div class="qrate-bar"><div class="qrate-fill' + (L === ans ? ' fill-ok' : '') + '" style="width:' + pct + '%"></div></div>' +
+          '<span class="qdist-pct">' + pct + '% · ' + cnt + '人</span></div>';
+      });
+      if (blankCnt) {
+        var bp = recs.length ? Math.round(blankCnt * 100 / recs.length) : 0;
+        distHtml += '<div class="qdist-row zero"><span class="qdist-L">空</span>' +
+          '<div class="qrate-bar"><div class="qrate-fill" style="width:' + bp + '%"></div></div>' +
+          '<span class="qdist-pct">' + bp + '% · ' + blankCnt + '人</span></div>';
+      }
+      distHtml += '</div>';
+    });
+
     var html = '<div class="stat-card">' +
       '<div class="stat-line"><span>已批人数</span><b>' + recs.length + '</b></div>' +
       '<div class="stat-line"><span>平均分</span><b>' + avg.toFixed(1) + '</b></div>' +
@@ -493,7 +531,7 @@
         '<div class="qrate-bar"><div class="qrate-fill" style="width:' + r.pct + '%"></div></div>' +
         '<span class="qrate-pct">' + r.pct + '%</span></div>';
     }).join('');
-    html += '</div><div class="stat-card">';
+    html += '</div><div class="stat-card"><div style="font-weight:700;margin-bottom:6px">逐题作答分布</div>' + distHtml + '</div><div class="stat-card">';
     html += sorted.map(function (r) {
       var d = new Date(r.ts);
       var t = ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2) + ' ' +
