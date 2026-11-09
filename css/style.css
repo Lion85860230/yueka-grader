@@ -139,6 +139,21 @@ textarea {
 .qrate-bar { flex: 1; height: 8px; border-radius: 4px; background: #222938; overflow: hidden; }
 .qrate-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, #ff8a5c, #ff5c5c); }
 .qrate-pct { width: 40px; font-size: 12px; color: #ff9f9f; text-align: right; }
+
+/* 逐题作答分布 */
+.qdist { margin: 12px 0 16px; padding-bottom: 4px; }
+.qdist-head { display: flex; align-items: baseline; gap: 10px; font-size: 13px; font-weight: 700; margin-bottom: 5px; }
+.qdist-no { color: #fff; }
+.qdist-ans { color: #4ade80; }
+.qdist-wrong { margin-left: auto; color: #ff8a80; font-weight: 600; }
+.qdist-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 12px; }
+.qdist-L { width: 32px; color: #c6cdda; font-weight: 600; }
+.qdist-row.ok .qdist-L { color: #4ade80; }
+.qdist-row.bad .qdist-L { color: #ff9f9f; }
+.qdist-row.zero { opacity: .4; }
+.qdist-row .qrate-bar { height: 7px; }
+.qdist-pct { width: 84px; text-align: right; color: #9aa4b8; font-size: 11px; }
+.qrate-fill.fill-ok { background: linear-gradient(90deg, #34d399, #4ade80); }
 .rec-row {
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 2px; border-bottom: 1px solid #1e2431; font-size: 14px;
