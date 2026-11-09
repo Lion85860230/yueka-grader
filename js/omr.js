@@ -105,17 +105,24 @@ function detectByAnchors(img, thr) {
     }
     const bw = maxX - minX + 1;
     const bh = maxY - minY + 1;
-    // 定位块：长宽比 2~4（45x16）或近方形（18x16），实心度高
+    // 定位块：长宽比 2~4（45x16）或近方形（18x16），实心度高。
+    // 尺寸阈值按图像长边自适应：手机实时流常被压到 1000~1300 长边，
+    // 此时锚点只有 20x7 左右，固定的 18/8 下限会把它整个滤掉。
+    const s = Math.max(W, H) / 1500;
+    const minBw = Math.max(9, Math.round(18 * s));
+    const minBh = Math.max(5, Math.round(8 * s));
     const fill = area / (bw * bh);
     const aspect = bw / bh;
-    if (bw < 18 || bw > 110 || bh < 8 || bh > 45) continue;
-    if (fill < 0.62) continue;
+    // 小块（运动模糊/低分辨率下墨色变淡）放宽实心度要求
+    const minFill = bh <= Math.max(8, Math.round(9 * s)) ? 0.55 : 0.62;
+    if (bw < minBw || bw > 110 || bh < minBh || bh > 45) continue;
+    if (fill < minFill) continue;
     if (aspect < 0.85 || aspect > 4.2) continue;
     comps.push({ cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: bw, h: bh, fill });
   }
   if (comps.length < 4) return null;
 
-  // 按行聚类：y 相近的分一组，找出最上和最下的行
+  // 按行聚类：y 相近的分一组
   comps.sort((a, b) => a.cy - b.cy);
   const rows = [];
   comps.forEach((c) => {
@@ -127,31 +134,64 @@ function detectByAnchors(img, thr) {
     console.log('[anchors] thr=%d comps=%d rows=%s', thr, comps.length,
       rows.map((r) => '{y=' + r[0].cy.toFixed(0) + ' n=' + r.length + '}').join(','));
   }
-  if (rows.length < 2) return null;
-  const topRow = rows[0];
-  const botRow = rows[rows.length - 1];
-  if (topRow.length < 2 || botRow.length < 2) return null;
-  topRow.sort((a, b) => a.cx - b.cx);
-  botRow.sort((a, b) => a.cx - b.cx);
-  const a = {
-    tl: topRow[0],
-    tr: topRow[topRow.length - 1],
-    bl: botRow[0],
-    br: botRow[botRow.length - 1],
-  };
-  // 几何校验
+
+  // 枚举所有"上行×下行 × 行内左右组合"，逐一做几何校验 + 仿射拟合，
+  // 取残差最小（同残差取面积最大）的一组。
+  // 之前只取 rows[0]/rows[rows.length-1] 贪心配对，一旦手机状态栏 /
+  // 浏览器地址栏混进假候选行，真正的锚点行就被跳过导致整帧失败。
+  const cands = rows
+    .filter((r) => r.length >= 2)
+    .map((r) => {
+      // 每行最多取 6 个候选（按面积保大块，锚点通常比噪点实）
+      const kept = r.slice().sort((p, q) => q.w * q.h - p.w * p.h).slice(0, 6);
+      kept.sort((p, q) => p.cx - q.cx);
+      const pairs = [];
+      for (let i = 0; i < kept.length; i += 1) {
+        for (let j = kept.length - 1; j > i; j -= 1) {
+          pairs.push([kept[i], kept[j]]);
+        }
+      }
+      return pairs;
+    });
+  if (cands.length < 2) return null;
+
+  const src4 = [ANCHORS.tl, ANCHORS.tr, ANCHORS.bl, ANCHORS.br];
+  let best = null;
+  for (let i = 0; i < cands.length - 1; i += 1) {
+    for (let j = i + 1; j < cands.length; j += 1) {
+      for (const [tl, tr] of cands[i]) {
+        for (const [bl, br] of cands[j]) {
+          const a = { tl, tr, bl, br };
+          const r = fitAffine(img, src4, a);
+          if (r && (!best || r.err < best.err - 0.01
+            || (Math.abs(r.err - best.err) <= 0.01 && r.area > best.area))) {
+            best = { err: r.err, area: r.area, quad: r.quad };
+          }
+        }
+      }
+    }
+  }
+  return best ? best.quad : null;
+}
+
+/** 由 4 个锚点做几何校验 + 6 自由度仿射最小二乘，返回 {err, area, quad} 或 null */
+function fitAffine(img, src4, a) {
+  const { gray, width: W, height: H } = img;
+  // 几何校验。
+  // 高度阈值用"高/宽设计比"而非画面高度的固定百分比：设计比例 1207.5/858≈1.41，
+  // 允许透视压缩到 0.85 倍。之前用 dyL ≥ H*0.6（卡片须占画面 60% 高），
+  // 用户手机拿稍远（卡片只占 55% 高）时差 1 个像素也会被拒，导致反复识别失败。
   const dxT = a.tr.cx - a.tl.cx;
   const dxB = a.br.cx - a.bl.cx;
   const dyL = a.bl.cy - a.tl.cy;
   const dyR = a.br.cy - a.tr.cy;
   if (dxT < W * 0.5 || dxB < W * 0.5) return null;
-  if (dyL < H * 0.6 || dyR < H * 0.6) return null;
+  if (dyL < dxT * 0.85 || dyR < dxT * 0.85) return null;
+  if (dyL > dxT * 2.2 || dyR > dxT * 2.2) return null;
   if (Math.abs(a.tl.cy - a.tr.cy) > H * 0.05) return null;
   if (Math.abs(a.bl.cy - a.br.cy) > H * 0.05) return null;
 
-  // 仿射变换最小二乘（6 自由度）：photo ≈ A·design + t
-  // 相比相似变换能吸收照片轻微的横竖比例差 / 剪切，4 个锚点足够求解
-  const src = [ANCHORS.tl, ANCHORS.tr, ANCHORS.bl, ANCHORS.br];
+  const src = src4;
   const dst = [a.tl, a.tr, a.bl, a.br].map((p) => ({ x: p.cx, y: p.cy }));
   const n = src.length;
   const msx = src.reduce((s, p) => s + p.x, 0) / n;
@@ -160,7 +200,8 @@ function detectByAnchors(img, thr) {
   const mdy = dst.reduce((s, p) => s + p.y, 0) / n;
   // 中心化后正规方程 [Sxx Sxy; Sxy Syy] [a1;a2] = [Sxu; Syu]（对 x' 和 y' 各解一次）
   let Sxx = 0; let Sxy = 0; let Syy = 0;
-  let Sxd = 0; let Syd = 0; let Sxe = 0; let Sye = 0;
+  let Sxd = 0; let Syd = 0;
+  let Sxe = 0; let Sye = 0;
   for (let i = 0; i < n; i += 1) {
     const ux = src[i].x - msx;
     const uy = src[i].y - msy;
@@ -182,17 +223,19 @@ function detectByAnchors(img, thr) {
     x: ax * u + bx * v + tx,
     y: ay * u + by * v + ty,
   });
-  // 残差校验（设计单位）
+  // 残差校验（照片像素）。锚点越小像素误差越敏感，按锚点平均宽度自适应放宽
   let err = 0;
   for (let i = 0; i < n; i += 1) {
     const p = tf(src[i].x, src[i].y);
     err += Math.hypot(p.x - dst[i].x, p.y - dst[i].y);
   }
   err /= n;
+  const avgW = (a.tl.w + a.tr.w + a.bl.w + a.br.w) / 4;
+  const errMax = Math.max(6, avgW * 0.3);
   if (typeof process !== 'undefined' && process.env && process.env.OMR_DEBUG) {
-    console.log('[anchors] ax=%s by=%s err=%s', ax.toFixed(4), by.toFixed(4), err.toFixed(3));
+    console.log('[anchors] ax=%s by=%s err=%s/%s', ax.toFixed(4), by.toFixed(4), err.toFixed(3), errMax.toFixed(1));
   }
-  if (err > 6) return null;
+  if (err > errMax) return null;
 
   const tl = tf(0, 0);
   const tr = tf(FRAME_W, 0);
@@ -200,13 +243,17 @@ function detectByAnchors(img, thr) {
   const bl = tf(0, FRAME_H);
   const ratio = Math.hypot(tr.x - tl.x, tr.y - tl.y) / Math.hypot(bl.x - tl.x, bl.y - tl.y);
   return {
-    tl: { x: tl.x, y: tl.y },
-    tr: { x: tr.x, y: tr.y },
-    br: { x: br.x, y: br.y },
-    bl: { x: bl.x, y: bl.y },
-    ok: true,
-    ratio,
-    anchors: true,
+    err,
+    area: dxT * dyL,
+    quad: {
+      tl: { x: tl.x, y: tl.y },
+      tr: { x: tr.x, y: tr.y },
+      br: { x: br.x, y: br.y },
+      bl: { x: bl.x, y: bl.y },
+      ok: true,
+      ratio,
+      anchors: true,
+    },
   };
 }
 
@@ -313,8 +360,17 @@ function detectQuad(img) {
     if (acc >= total * 0.7) { median = i; break; }
   }
   const darkThr = Math.max(60, Math.min(130, Math.round(median * 0.55)));
-  const byAnchor = detectByAnchors(img, darkThr);
-  if (byAnchor) return byAnchor;
+  // 手持拍摄时运动模糊会让锚点墨色变浅、部分锚点低于阈值而漏检。
+  // 用多档阈值重试：标准档失败后，放宽（抓回变浅的锚点）再收紧（排除噪点干扰）。
+  const tries = [darkThr, Math.round(darkThr * 0.85), Math.round(darkThr * 1.15)];
+  const seen = {};
+  for (let i = 0; i < tries.length; i += 1) {
+    const t = tries[i];
+    if (seen[t]) continue;
+    seen[t] = 1;
+    const byAnchor = detectByAnchors(img, t);
+    if (byAnchor) return byAnchor;
+  }
   const byProj = detectByProjection(img);
   if (byProj) return byProj;
   return null;
