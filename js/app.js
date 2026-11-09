@@ -223,10 +223,15 @@
       dbg = img.width + 'x' + img.height + (quad && quad.anchors ? ' 锚点✓' : ' 锚点✗');
       if (!quad || !quad.anchors) {
         scan.needLeave = false; scan.streak = 0; scan.lastSig = '';
-        setStatus('将答题卡放入画面', 'idle');
+        scan.failN = (scan.failN || 0) + 1;
+        // 连续多帧定位失败时给出更具体的引导（多半是拿太远或有遮挡）
+        setStatus(scan.failN >= 6
+          ? '靠近一点：让答题卡占满画面约三分之二，避免手指遮挡四角黑块'
+          : '将答题卡放入画面', 'idle');
         clearOverlay();
         return;
       }
+      scan.failN = 0;
       if (!OMR.orientationOk(img, quad)) {
         scan.needLeave = false; scan.streak = 0; scan.lastSig = '';
         setStatus('答题卡放倒了，请旋转 180°', 'warn');
