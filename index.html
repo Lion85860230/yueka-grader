@@ -102,10 +102,18 @@
     <span class="nav-btn"></span>
   </header>
   <div class="page-body">
-    <div class="hint-block">每行一个学生，格式：学号,姓名（逗号或空格分隔），例如：<br>20417,张三<br>20418 李四<br>可选：学号,姓名,班级</div>
+    <div class="hint-block">支持直接导入 <b>Excel（.xlsx/.xls）</b> 或 <b>CSV/文本</b> 文件：自动识别「学号 / 姓名 / 班级」列，同 学号 覆盖更新。也可在下面手动编辑。</div>
+    <div class="roster-actions">
+      <label class="btn btn-primary center grow" for="rosterFile">📂 导入文件（Excel/CSV）</label>
+    </div>
+    <div class="import-tip" id="importTip"></div>
     <textarea id="rosterText" rows="14" placeholder="20417,张三&#10;20418,李四"></textarea>
-    <button class="btn btn-primary" id="btnSaveRoster" style="margin-top:12px">保存名单</button>
+    <div class="menu-row" style="margin-top:12px">
+      <button class="btn btn-ghost grow" id="btnClearRoster">清空名单</button>
+      <button class="btn btn-primary grow" id="btnSaveRoster">保存名单</button>
+    </div>
   </div>
+  <input type="file" id="rosterFile" accept=".xlsx,.xls,.csv,.txt" hidden>
 </div>
 
 <!-- ==================== 成绩与错题率 ==================== -->
@@ -127,6 +135,7 @@
 <script src="js/template.js"></script>
 <script src="js/omr.js"></script>
 <script src="js/exam.js"></script>
+<script src="js/xlsx.full.min.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
