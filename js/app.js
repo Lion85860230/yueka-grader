@@ -289,6 +289,9 @@
         setStatus('当前卡已记录，请先拿开', 'warn');
         return;
       }
+      // 一定位到版面就立刻画黑框 + 内部各框（考号框、每题选项框），
+      // 屏幕即时反馈“扫描框”，无需等学号读出；随后用识别结果高亮涂卡点。
+      drawGuide(quad, img, null);
       var read = OMR.readSheet(img, quad, { sensitivity: 'normal' });
       dbg += ' 学号' + (read.studentNoValid ? '✓' : '✗');
       var sig = read.studentNoValid
@@ -301,10 +304,10 @@
         lockIn(read, quad, img);
       } else if (read.studentNoValid) {
         setStatus('识别中，请持稳…', 'busy');
-        drawTrack(quad);
+        drawGuide(quad, img, read);
       } else {
         setStatus('未识别到学号，请对准并保持光线均匀', 'warn');
-        drawTrack(quad);
+        drawGuide(quad, img, read);
       }
     } catch (e) {
       dbg = 'ERR ' + ((e && e.message) || e);
@@ -322,6 +325,76 @@
     ctx.strokeStyle = 'rgba(80, 220, 140, .95)';
     ctx.lineWidth = 3;
     ctx.stroke();
+  }
+
+  /* 借鉴参考应用的实时扫描引导：黑框套住答题卡，屏内画出各个内部框
+     ——考号每位方格、每题每个选项小框；定位成功即显示，涂卡点青色高亮。 */
+  function drawGuide(quad, img, read) {
+    if (!scan.octx) return;
+    var ctx = scan.octx;
+    ctx.clearRect(0, 0, scan.ovW, scan.ovH);
+    var quadR = (img && read) ? OMR.refineQuad(img, quad, read.quality.white) : quad;
+    var s = scan.map.scale;
+    var qw = OMR.quadWidth(quadR);
+    var qh = (quadR.bl.y - quadR.tl.y + quadR.br.y - quadR.tr.y) / 2;
+    var M = function (u, v) { return toScreen(OMR.mapPoint(quadR, u, v)); };
+
+    // 1) 黑色外框 + 青色四角角标
+    drawQuadPath(ctx, quadR);
+    ctx.strokeStyle = 'rgba(20, 24, 30, .92)';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    var corners = [quadR.tl, quadR.tr, quadR.br, quadR.bl].map(toScreen);
+    var arm = Math.max(14, Math.min(corners[1].x - corners[0].x, corners[3].y - corners[0].y) * 0.07);
+    ctx.strokeStyle = 'rgba(0, 210, 190, .98)';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    corners.forEach(function (p, i) {
+      var nx = corners[(i + 1) % 4], pv = corners[(i + 3) % 4];
+      var dx1 = nx.x - p.x, dy1 = nx.y - p.y, dx2 = pv.x - p.x, dy2 = pv.y - p.y;
+      var l1 = Math.hypot(dx1, dy1) || 1, l2 = Math.hypot(dx2, dy2) || 1;
+      ctx.beginPath();
+      ctx.moveTo(p.x + dx1 / l1 * arm, p.y + dy1 / l1 * arm);
+      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(p.x + dx2 / l2 * arm, p.y + dy2 / l2 * arm);
+      ctx.stroke();
+    });
+
+    // 2) 内部各框：考号每位小框 + 每题每个选项小框
+    var bw = Math.max(7, TPL.radiusX * qw * s * 2.5);
+    var bh = Math.max(5, TPL.radiusY * qh * s * 2.5);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0, 200, 185, .55)';
+    var box = function (c) {
+      var p = M(c[0], c[1]);
+      ctx.strokeRect(p.x - bw / 2, p.y - bh / 2, bw, bh);
+    };
+    TPL.studentNo.forEach(function (row) { row.forEach(box); });
+    TPL.questions.forEach(function (q) { q.cells.forEach(box); });
+
+    // 3) 已识别涂卡点用青色实心高亮
+    if (read && read.choices) {
+      ctx.fillStyle = 'rgba(0, 230, 200, .9)';
+      TPL.questions.forEach(function (q) {
+        var mine = read.choices[q.no];
+        var idx = mine ? q.options.indexOf(mine) : -1;
+        if (idx < 0 || !q.cells[idx]) return;
+        var p = M(q.cells[idx][0], q.cells[idx][1]);
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y, bw * 0.46, bh * 0.46, 0, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      if (read.studentNoValid && read.studentNo) {
+        String(read.studentNo).split('').forEach(function (d, i) {
+          if (!TPL.studentNo[i] || !/^\d$/.test(d)) return;
+          var c = TPL.studentNo[i][Number(d)];
+          var p = M(c[0], c[1]);
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.y, bw * 0.4, bh * 0.4, 0, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+    }
   }
 
   function drawMarks(read, quad, img, result) {
