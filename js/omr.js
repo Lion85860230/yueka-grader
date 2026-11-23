@@ -648,6 +648,40 @@ function orientationOk(img, quad) {
   return collectCentroids(img, quad, white, r, cap).length >= 150;
 }
 
+/** 正向判别：利用版面的强不对称性。
+ *  两种模板的左上角都是「答题卡模板」标题 + 姓名/班级/学号横线 + 黑色填涂示例块，
+ *  右下角则为大片空白（35 题卡右下完全空白；55 题卡右下也无内容）。
+ *  因此正向时 左上墨量 明显大于 右下墨量；整体旋转 180° 后二者反转。
+ *  cw/ccw 因版面近似 180° 对称，orientationOk 无法区分，必须用这个指标。
+ *  返回 upright 分数（左上墨量 - 右下墨量），>0 视为正向。 */
+function uprightScore(img, quad) {
+  if (!quad) return 0;
+  const white = whiteLevel(img, quad);
+  const { gray, width: W, height: H } = img;
+  const region = (u0, u1, v0, v1) => {
+    let sum = 0; let n = 0;
+    const STEPU = 12; const STEPV = 12;
+    for (let i = 0; i <= STEPU; i += 1) {
+      for (let j = 0; j <= STEPV; j += 1) {
+        const p = mapPoint(quad, u0 + (u1 - u0) * i / STEPU, v0 + (v1 - v0) * j / STEPV);
+        const x = Math.round(p.x); const y = Math.round(p.y);
+        if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) continue;
+        // 取 3x3 均值，抗噪点
+        let v = 0; let c = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) { v += gray[(y + dy) * W + (x + dx)]; c += 1; }
+        }
+        sum += Math.max(0, (white - v / c) / Math.max(1, white));
+        n += 1;
+      }
+    }
+    return n ? sum / n : 0;
+  };
+  const tl = region(0.06, 0.30, 0.05, 0.30);
+  const br = region(0.70, 0.94, 0.70, 0.95);
+  return tl - br;
+}
+
 function refineQuad(img, quad, white) {
   const qw = quadWidth(quad);
   const r = Math.max(5, Math.min(10, qw * 0.0095));
@@ -839,6 +873,7 @@ window.OMR = {
   readSheet,
   refineQuad,
   orientationOk,
+  uprightScore,
   mapPoint,
   quadWidth,
   samplePoints,
