@@ -523,13 +523,27 @@ function detectQuad(img) {
   }
   // 新版 L 形角标卡：外框矩形直线定位（深色桌面边缘误判已在内部排除）
   const byBorder = detectByBorder(img);
-  if (byBorder) return byBorder;
+  if (validQuad(byBorder, W, H)) return byBorder;
   // 深色桌面上的白卡：白色纸面包围盒定位
   const byPaper = detectByPaper(img);
-  if (byPaper) return byPaper;
+  if (validQuad(byPaper, W, H)) return byPaper;
   const byProj = detectByProjection(img);
-  if (byProj) return byProj;
+  if (validQuad(byProj, W, H)) return byProj;
   return null;
+}
+
+/** 结果合法性：真实卡片四周总会留白，绝不会铺满整幅画面。
+ *  深色/无卡场景常误检成“覆盖全屏”的四边形，必须挡掉，否则乱画引导框。 */
+function validQuad(q, W, H) {
+  if (!q) return false;
+  const x0 = Math.min(q.tl.x, q.bl.x); const x1 = Math.max(q.tr.x, q.br.x);
+  const y0 = Math.min(q.tl.y, q.tr.y); const y1 = Math.max(q.bl.y, q.br.y);
+  if (x1 - x0 < W * 0.2 || y1 - y0 < H * 0.2) return false;
+  const cover = ((x1 - x0) * (y1 - y0)) / (W * H);
+  // 深色/无卡时误检的四边形正好等于整幅画面(cover≈1.0)；真实卡即使用力贴近
+  // 也几乎不会 100% 铺满(印刷框外还有纸边)。用 0.97 只挡“整屏”误检。
+  if (cover > 0.97) return false;
+  return true;
 }
 
 function quadWidth(q) {
