@@ -18,6 +18,12 @@ b { color: #ffd166; }
 .brand-sub { color: #8a93a5; font-size: 13px; margin: 2px 0 18px; }
 .card { background: #171c26; border-radius: 14px; padding: 16px; }
 .exam-title { font-size: 17px; font-weight: 700; }
+.tpl-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.tpl-row label { font-size: 13px; color: #c8cede; }
+.tpl-row select {
+  flex: 1; background: #232a38; color: #fff; border: 1px solid #39435a;
+  border-radius: 8px; padding: 8px 10px; font-size: 14px;
+}
 .exam-sub { font-size: 12px; color: #8a93a5; margin-top: 6px; }
 .exam-warn { font-size: 12px; color: #ff9f43; margin-top: 6px; }
 .menu { margin-top: 18px; display: flex; flex-direction: column; gap: 12px; }
