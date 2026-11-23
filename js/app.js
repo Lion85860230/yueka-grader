@@ -437,9 +437,64 @@
   }
 
   /* 选方向：四方向都跑一遍，用正向地标分 + 答案数 + 学号有效性综合打分 */
+  /* 固定框直接采样：把屏幕上的黑框反算到相机帧，作为 quad 直接读。
+     这是“参考视频”里扫描助手的核心做法——用户把卡放进框，程序按框的
+     已知几何采样，不依赖脆弱的边缘/锚点检测。refineQuad 会自动吸附到
+     印刷气泡网格，容忍几像素的手抖。四个旋转方向 × 两个角点轮转(正/倒)
+     全部试一遍，用正向地标分挑出正确方向。 */
+  function fixedFrameCandidates(raw) {
+    var out = [];
+    if (!scan.fixedRect || !scan.map) return out;
+    var m = scan.map;
+    var r = scan.fixedRect;
+    // 屏幕坐标 → 原始帧坐标（updateMap 的逆）
+    var s2raw = function (sx, sy) {
+      return { x: sx / m.scale + m.ox, y: sy / m.scale + m.oy };
+    };
+    var rawCorners = [
+      s2raw(r.x0, r.y0), s2raw(r.x1, r.y0),
+      s2raw(r.x1, r.y1), s2raw(r.x0, r.y1),
+    ];
+    var W = raw.width; var H = raw.height;
+    for (var ri = 0; ri < ROTS.length; ri += 1) {
+      var dir = ROTS[ri];
+      var im = rotateGray(raw, dir);
+      // 原始帧点 → 旋转后分析图点（rotateGray 的逆映射）
+      var mapP = function (p) {
+        if (dir === 'none') return { x: p.x, y: p.y };
+        if (dir === 'cw') return { x: H - 1 - p.y, y: p.x };
+        if (dir === 'ccw') return { x: p.y, y: W - 1 - p.x };
+        return { x: W - 1 - p.x, y: H - 1 - p.y };
+      };
+      var pts = rawCorners.map(mapP);
+      // shift=0 正向 / shift=2 颠倒（卡上下放反时）
+      for (var si = 0; si < 4; si += 1) {
+        var at = function (i) { return pts[(i + si) % 4]; };
+        var q = { tl: at(0), tr: at(1), br: at(2), bl: at(3), ok: false, anchors: false, fixed: true };
+        var up = OMR.uprightScore(im, q);
+        var rd = OMR.readSheet(im, q, { sensitivity: 'normal' });
+        var nAns = Object.keys(rd.choices).length;
+        out.push({ dir: dir, img: im, quad: q, read: rd, up: up, nAns: nAns, shift: si });
+      }
+    }
+    return out;
+  }
+
   function analyzeFrame(raw) {
     var best = null;
     var dbgParts = [];
+    var consider = function (c, tag) {
+      var score = c.nAns + (c.read.studentNoValid ? 40 : 0) + c.up * 60
+        - (c.read.quality.lowContrast || 0) * 2;
+      if (c.up < UPRIGHT_MIN) return; // 淘汰颠倒/非卡方向
+      if (!best || score > best.score) {
+        best = {
+          dir: c.dir, img: c.img, quad: c.quad, read: c.read,
+          score: score, up: c.up, nAns: c.nAns, source: tag,
+        };
+      }
+    };
+    // 主路径：自动检测四方向
     for (var ri = 0; ri < ROTS.length; ri += 1) {
       var dir = ROTS[ri];
       if (scan.rotFilter && dir !== scan.rotFilter) continue;
@@ -449,12 +504,21 @@
       var up = OMR.uprightScore(im, q);
       var rd = OMR.readSheet(im, q, { sensitivity: 'normal' });
       var nAns = Object.keys(rd.choices).length;
-      var score = nAns + (rd.studentNoValid ? 40 : 0) + up * 60 - (rd.quality.lowContrast || 0) * 2;
       dbgParts.push(dir + ':' + nAns + '/' + up.toFixed(2));
-      // 正向地标分过低的直接淘汰（逆/倒的版面）
-      if (up < UPRIGHT_MIN) continue;
-      if (!best || score > best.score) {
-        best = { dir: dir, img: im, quad: q, read: rd, score: score, up: up, nAns: nAns };
+      consider({ dir: dir, img: im, quad: q, read: rd, up: up, nAns: nAns }, 'detect');
+    }
+    // 兜底：自动检测全部失败（手持/倾斜/深色桌面）时，按固定取景框直接采样
+    if (!best) {
+      var fixed = fixedFrameCandidates(raw);
+      var fbest = null;
+      fixed.forEach(function (c) {
+        var sc = c.nAns + (c.read.studentNoValid ? 40 : 0) + c.up * 60;
+        if (c.up < UPRIGHT_MIN) return;
+        if (!fbest || sc > fbest.sc) fbest = { c: c, sc: sc };
+      });
+      if (fbest) {
+        consider(fbest.c, 'fixed');
+        dbgParts.push('fixed:' + fbest.c.nAns + '/' + fbest.c.up.toFixed(2));
       }
     }
     return { best: best, dbg: dbgParts.join(' ') };
