@@ -1,5 +1,5 @@
 /* 阅卡 H5 主逻辑：实时扫描 / 拍照批阅 / 答案与名单 / 成绩与错题率 */
-/* global TPL, OMR, EXAM */
+/* global TPL55, TPL35, TPLS, OMR, EXAM */
 (function () {
   'use strict';
 
@@ -9,15 +9,61 @@
     },
     set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 满/隐私模式忽略 */ } },
   };
-  var K = { answers: 'acg_web_answers_v1', roster: 'acg_web_roster_v1', records: 'acg_web_records_v1', muted: 'acg_web_muted_v1' };
+  var K = {
+    answers: 'acg_web_answers_v1', roster: 'acg_web_roster_v1', records: 'acg_web_records_v1',
+    muted: 'acg_web_muted_v1', cardType: 'acg_web_cardtype_v1'
+  };
 
   var LETTERS = EXAM.LETTERS;
-  var NUMS = EXAM.choiceNumbers();
-  var FULL = 95;
+  // 题量模板：55 题 / 35 题，按答题卡版式切换
+  var cardType = Number(LS.get(K.cardType, 55)) === 35 ? 35 : 55;
+  var TPL = TPLS[cardType];
+  var NUMS;
+  var FULL;
+  var SECTION_META;
+
+  function sectionMetaFor(ct) {
+    if (ct === 35) {
+      return [
+        { label: '一、1-15（A-D）', from: 1, to: 15 },
+        { label: '二、七选五 16-21（A-G）', from: 16, to: 21 },
+        { label: '三、22-35（A-D）', from: 22, to: 35 },
+      ];
+    }
+    return [
+      { label: '一、听力 1-20（A-C）', from: 1, to: 20 },
+      { label: '二、阅读 21-35（A-D）', from: 21, to: 35 },
+      { label: '七选五 36-40（A-G）', from: 36, to: 40 },
+      { label: '三、完形 41-55（A-D）', from: 41, to: 55 },
+    ];
+  }
+
+  /** 应用题量模板：切换识别模板、题型结构、题号/满分/副标题 */
+  function applyCardType(ct) {
+    cardType = Number(ct) === 35 ? 35 : 55;
+    TPL = TPLS[cardType];
+    OMR.setTemplate(TPL);
+    EXAM.setCardType(cardType);
+    NUMS = EXAM.choiceNumbers();
+    FULL = EXAM.fullScore(EXAM.defaultScores());
+    SECTION_META = sectionMetaFor(cardType);
+    LS.set(K.cardType, cardType);
+    var sel = $('tplSelect');
+    if (sel) sel.value = String(cardType);
+    var sub = $('examSub');
+    if (sub) {
+      sub.innerHTML = cardType === 35
+        ? '35 题答题卡（1-15 A-D · 16-21 七选五 A-G · 22-35 A-D）· 满分 <b>' + FULL + '</b>'
+        : '55 题答题卡（听力 20 · 阅读 20 · 七选五 5 · 完形 10）· 满分 <b>' + FULL + '</b>';
+    }
+  }
 
   function optionsOf(no) { return LETTERS.slice(0, EXAM.optionsOf(no)); }
-  function currentExam() { return EXAM.createExam({ title: '英语选择题', answers: LS.get(K.answers, {}) }); }
+  function currentExam() {
+    return EXAM.createExam({ title: '选择题批阅', cardType: cardType, answers: LS.get(K.answers, {}) });
+  }
   function $(id) { return document.getElementById(id); }
+  applyCardType(cardType);
 
   function showView(name) {
     ['home', 'scan', 'photo', 'answers', 'roster', 'records'].forEach(function (v) {
@@ -406,12 +452,6 @@
   }
 
   /* ================= 标准答案编辑 ================= */
-  var SECTION_META = [
-    { label: '一、听力 1-20（A-C）', from: 1, to: 20 },
-    { label: '二、阅读 21-35（A-D）', from: 21, to: 35 },
-    { label: '七选五 36-40（A-G）', from: 36, to: 40 },
-    { label: '三、完形 41-55（A-D）', from: 41, to: 55 },
-  ];
   function renderAnswers() {
     var answers = LS.get(K.answers, {});
     var box = $('answerChips');
@@ -720,6 +760,18 @@
     LS.set(K.roster, list);
     alert('已保存 ' + list.length + ' 名学生');
     showView('home');
+  };
+  $('tplSelect').onchange = function (e) {
+    var ct = Number(e.target.value);
+    if (ct === cardType) return;
+    if (!confirm('切换答题卡模板会清空当前标准答案（题号范围不同），确定继续？')) {
+      e.target.value = String(cardType);
+      return;
+    }
+    LS.set(K.answers, {});
+    applyCardType(ct);
+    renderHome();
+    alert('已切换为 ' + (ct === 35 ? '35 题' : '55 题') + ' 模板，请重新设置标准答案');
   };
   $('btnRecords').onclick = function () { showView('records'); };
   $('btnRecordsBack').onclick = function () { showView('home'); };
