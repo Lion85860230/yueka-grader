@@ -417,6 +417,11 @@ function detectByBorder(img) {
   for (let x = W - 1; x >= 0; x -= 1) { if (colN[x] >= lineThr) { right = x; break; } }
   if (top < 0 || bottom <= top || left < 0 || right <= left) return null;
 
+  // 深色桌面会把整幅画面的边缘误判成外框线：若四条边都贴在图像边缘，
+  // 说明抓到的是画面边界而非卡片，放弃，交给纸面定位。
+  const edge = Math.max(2, Math.round(Math.min(W, H) * 0.004));
+  if (top <= edge && left <= edge && bottom >= H - 1 - edge && right >= W - 1 - edge) return null;
+
   const w = right - left;
   const h = bottom - top;
   const { fw, fh } = frameSize();
@@ -437,11 +442,59 @@ function detectByBorder(img) {
   };
 }
 
+/** 白色纸面定位（适配深色桌面上的白卡）。
+ *  深色背景下 detectByBorder 会把整幅画面的边缘误当作外框线，
+ *  这里改为找“大面积高亮区域”（白纸）的包围盒，才是卡片真实位置。
+ *  纸面通常就贴在印刷外框外侧一圈，refineQuad 会用印刷网格再精修。*/
+function detectByPaper(img) {
+  const { gray, width: W, height: H } = img;
+  const hist = new Uint32Array(256);
+  let total = 0;
+  for (let i = 0; i < gray.length; i += 3) { hist[gray[i]] += 1; total += 1; }
+  // 暗部取 5% 分位、亮部取 10% 分位，避免“白卡占大半画面”时把背景误估成白色
+  let acc = 0; let dark = 60;
+  for (let i = 0; i < 256; i += 1) { acc += hist[i]; if (acc >= total * 0.05) { dark = i; break; } }
+  acc = 0; let bright = 235;
+  for (let i = 255; i >= 0; i -= 1) { acc += hist[i]; if (acc >= total * 0.10) { bright = i; break; } }
+  if (bright - dark < 50) return null; // 对比不足，放弃
+  const thr = Math.max(90, (bright + dark) / 2);
+
+  const rowB = new Float32Array(H);
+  const colB = new Float32Array(W);
+  for (let y = 0; y < H; y += 1) {
+    let c = 0;
+    for (let x = 0; x < W; x += 2) if (gray[y * W + x] >= thr) c += 1;
+    rowB[y] = c / Math.ceil(W / 2);
+  }
+  for (let x = 0; x < W; x += 1) {
+    let c = 0;
+    for (let y = 0; y < H; y += 2) if (gray[y * W + x] >= thr) c += 1;
+    colB[x] = c / Math.ceil(H / 2);
+  }
+  const rows = [];
+  const cols = [];
+  for (let y = 0; y < H; y += 1) if (rowB[y] >= 0.35) rows.push(y);
+  for (let x = 0; x < W; x += 1) if (colB[x] >= 0.35) cols.push(x);
+  if (rows.length < H * 0.2 || cols.length < W * 0.2) return null;
+  const y0 = rows[0]; const y1 = rows[rows.length - 1];
+  const x0 = cols[0]; const x1 = cols[cols.length - 1];
+  const ratio = (x1 - x0) / (y1 - y0);
+  const { fw, fh } = frameSize();
+  const expect = fw / fh;
+  if (Math.abs(ratio - expect) / expect > 0.2) return null;
+  return {
+    tl: { x: x0, y: y0 }, tr: { x: x1, y: y0 },
+    br: { x: x1, y: y1 }, bl: { x: x0, y: y1 },
+    ok: true, ratio, anchors: true, paper: true,
+  };
+}
+
 /**
  * 版面外框检测总入口：
  *  1. 四角实心定位块 + 相似变换（旧卡，精准）
- *  2. 外框矩形直线（新版 L 形角标卡）
- *  3. 行/列投影法（兜底）
+ *  2. 外框矩形直线（浅色背景 / L 形角标卡，已排除画面边缘误判）
+ *  3. 白色纸面包围盒（深色桌面上的白卡）
+ *  4. 行/列投影法（兜底）
  */
 function detectQuad(img) {
   const { gray, width: W, height: H } = img;
@@ -468,9 +521,12 @@ function detectQuad(img) {
     const byAnchor = detectByAnchors(img, t);
     if (byAnchor) return byAnchor;
   }
-  // 新版 L 形角标卡：外框矩形直线定位
+  // 新版 L 形角标卡：外框矩形直线定位（深色桌面边缘误判已在内部排除）
   const byBorder = detectByBorder(img);
   if (byBorder) return byBorder;
+  // 深色桌面上的白卡：白色纸面包围盒定位
+  const byPaper = detectByPaper(img);
+  if (byPaper) return byPaper;
   const byProj = detectByProjection(img);
   if (byProj) return byProj;
   return null;
