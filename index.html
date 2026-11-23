@@ -17,8 +17,15 @@
   </header>
 
   <div class="card exam-card">
-    <div class="exam-title">英语答题卡 · 选择题批阅</div>
-    <div class="exam-sub">听力 1-20（每题1.5） · 阅读 21-40（每题2.5） · 完形 41-55（每题1） · 满分 <b>95</b></div>
+    <div class="exam-title">答题卡 · 选择题批阅</div>
+    <div class="tpl-row">
+      <label for="tplSelect">答题卡模板</label>
+      <select id="tplSelect">
+        <option value="55">55 题答题卡</option>
+        <option value="35">35 题答题卡</option>
+      </select>
+    </div>
+    <div class="exam-sub" id="examSub">55 题答题卡（听力 20 · 阅读 20 · 七选五 5 · 完形 10）· 满分 <b>95</b></div>
     <div class="exam-warn" id="answersWarn"></div>
   </div>
 
@@ -132,6 +139,9 @@
 
 <input type="file" id="fileInput" accept="image/*" capture="environment" hidden>
 
+<script src="js/template55.js"></script>
+<script src="js/template35.js"></script>
+<script src="js/templates.js"></script>
 <script src="js/template.js"></script>
 <script src="js/omr.js"></script>
 <script src="js/exam.js"></script>
