@@ -77,7 +77,13 @@ b { color: #ffd166; }
   bottom: calc(24px + env(safe-area-inset-bottom));
   display: flex; justify-content: center; gap: 16px; z-index: 5;
 }
-.hud-btn { padding: 12px 26px; border-radius: 24px; background: rgba(0, 0, 0, .55); color: #fff; font-size: 15px; }
+.hud-btn { padding: 12px 22px; border-radius: 24px; background: rgba(0, 0, 0, .55); color: #fff; font-size: 15px; }
+.hud-capture {
+  background: linear-gradient(135deg, #00d2be, #00a893);
+  color: #06201d; font-weight: 700; padding: 12px 30px;
+  box-shadow: 0 4px 16px rgba(0, 200, 180, .4);
+}
+.hud-capture:active { transform: scale(.96); }
 .result-float {
   position: absolute; top: calc(112px + env(safe-area-inset-top)); right: 16px;
   min-width: 170px; padding: 14px 18px 12px; border-radius: 14px;
