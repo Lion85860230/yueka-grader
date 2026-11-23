@@ -10,7 +10,19 @@
  *     这样即使气泡里印着字母，也不会被误判为“已涂”
  * ------------------------------------------------------------------
  */
-const template = window.TPL;
+// 当前识别模板，可通过 setTemplate 按试卷题量切换（55 题 / 35 题）
+let template = window.TPL55;
+
+/** 切换识别模板（在扫描前由页面根据试卷 cardType 调用） */
+function setTemplate(tpl) {
+  if (tpl && tpl.questions && tpl.studentNo) template = tpl;
+  return template;
+}
+
+/** 获取当前识别模板 */
+function getTemplate() {
+  return template;
+}
 
 const SENSITIVITY = {
   loose: { ratio: 1.5, abs: 0.28 },
@@ -672,5 +684,7 @@ window.OMR = {
   mapPoint,
   quadWidth,
   samplePoints,
+  setTemplate,
+  getTemplate,
   SENSITIVITY,
 };
