@@ -149,16 +149,24 @@
       : '✓ 标准答案已录入 ' + n + ' 题，可以开始批阅';
   }
 
-  /* ================= 实时扫描 ================= */
+  /* ================= 实时扫描 =================
+   * 借鉴“答题卡扫描助手”的取景模式：
+   *  1) 打开扫描立刻显示固定黑框 + 内部各框（考号 / 每题选项），用户把卡放进框即可；
+   *  2) 每个方向都尝试，用「正向地标分」区分 cw/ccw 与 180°，避免横放卡读反；
+   *  3) 定位到高质量一帧即锁定，不再要求连续两帧一致，扫描更快；
+   *  4) 提供“拍摄识别”按钮手动确认，避免反复调整。
+   */
+  var ROTS = ['none', 'cw', 'ccw', '180'];
   var scan = {
     stream: null, video: null, octx: null, ovW: 0, ovH: 0,
     work: null, wctx: null, timer: null, busy: false,
-    frameN: 0, lastProc: 0, streak: 0, lastSig: '', needLeave: false, locked: false,
-    map: null, holdTimer: null,
+    frameN: 0, lastProc: 0, needLeave: false, locked: false,
+    map: null, holdTimer: null, rotFilter: null,
+    fixedQuad: null, lastBest: null,
   };
-  var PROCESS_INTERVAL = 300;
-  var LIVE_MAX_SIDE = 1000;
-  var STREAK_NEED = 2;
+  var PROCESS_INTERVAL = 200;
+  var LIVE_MAX_SIDE = 1100;
+  var UPRIGHT_MIN = 0.045;      // 正向地标分阈值：低于此值视为颠倒/非卡
 
   function setStatus(text, level) {
     var el = $('scanStatus');
@@ -166,6 +174,21 @@
     el.className = 'hud-status lv-' + (level || 'idle');
   }
   function setDbg(text) { $('scanDbg').textContent = text; }
+
+  /* 固定取景框：按模板宽高比在屏幕中央算出矩形（四角归一化 0..1） */
+  function computeFixedFrame() {
+    var sw = scan.ovW, sh = scan.ovH;
+    var ar = TPL.frame.w / TPL.frame.h; // 横版约 1.6 / 1.34
+    var maxW = sw * 0.86;
+    var maxH = sh * 0.66;
+    var w = maxW; var h = w / ar;
+    if (h > maxH) { h = maxH; w = h * ar; }
+    var x0 = (sw - w) / 2;
+    var y0 = (sh - h) / 2 - sh * 0.02;
+    scan.fixedRect = { x0: x0, y0: y0, x1: x0 + w, y1: y0 + h };
+    // 固定框在“分析图 none 方向”的等价归一化 quad：由屏幕坐标反推到原始帧
+    scan.fixedQuad = null; // 每帧根据 raw 尺寸计算
+  }
 
   function startScan() {
     showView('scan');
@@ -179,6 +202,13 @@
     var dpr = ov.width / scan.ovW;
     scan.octx = ov.getContext('2d');
     scan.octx.scale(dpr, dpr);
+    computeFixedFrame();
+    scan.rotFilter = null;
+    scan.lastBest = null;
+    // 取景框在进入扫描的第一时间就画出来，不等识别
+    drawIdleFrame();
+    setStatus('把答题卡放入黑框内，对齐四角', 'idle');
+    setDbg('等待相机');
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus('此浏览器不支持摄像头，请用拍照批阅', 'warn');
@@ -193,10 +223,10 @@
       scan.video.srcObject = stream;
       return scan.video.play();
     }).then(function () {
-      setStatus('将答题卡放入画面', 'idle');
+      setStatus('把答题卡放入黑框内，对齐四角', 'idle');
       scan.work = document.createElement('canvas');
       scan.wctx = scan.work.getContext('2d', { willReadFrequently: true });
-      scan.timer = setInterval(tick, 120);
+      scan.timer = setInterval(tick, 100);
     }).catch(function (e) {
       setStatus('相机启动失败：' + (e && e.name || ''), 'warn');
       setDbg((e && e.message) || String(e));
@@ -212,7 +242,7 @@
     }
     if (scan.video) scan.video.srcObject = null;
     if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (e) { /* 忽略 */ } }
-    scan.locked = false; scan.busy = false; scan.streak = 0; scan.lastSig = ''; scan.needLeave = false;
+    scan.locked = false; scan.busy = false; scan.needLeave = false; scan.lastBest = null;
     $('resultFloat').hidden = true;
   }
 
@@ -233,24 +263,25 @@
     return { gray: gray, width: W, height: H };
   }
 
-  /* 灰度图旋转 90°：'cw' 顺时针 / 'ccw' 逆时针。
-     手机竖持、答题卡横放（横屏扫描）时，画面里的卡是侧着的，
-     必须旋转回正向才能定位采样。 */
+  /* 灰度图旋转：'cw' 顺时针 / 'ccw' 逆时针 / '180' 颠倒 */
   function rotateGray(img, dir) {
     if (dir === 'none') return img;
     var w = img.width, h = img.height, nw = h, nh = w;
+    if (dir === '180') { nw = w; nh = h; }
     var g = new Uint8Array(nw * nh);
     for (var y = 0; y < nh; y += 1) {
       for (var x = 0; x < nw; x += 1) {
-        var sx = dir === 'cw' ? y : w - 1 - y;
-        var sy = dir === 'cw' ? h - 1 - x : x;
+        var sx, sy;
+        if (dir === 'cw') { sx = y; sy = h - 1 - x; }
+        else if (dir === 'ccw') { sx = w - 1 - y; sy = x; }
+        else { sx = w - 1 - x; sy = h - 1 - y; }
         g[y * nw + x] = img.gray[sy * w + sx];
       }
     }
     return { gray: g, width: nw, height: nh };
   }
 
-  /* 屏幕映射：视频 object-fit:cover，原始帧坐标 → 屏幕坐标 */
+  /* 视频 object-fit:cover 的帧坐标 → 屏幕坐标 */
   function updateMap(fw, fh) {
     var sw = window.innerWidth, sh = window.innerHeight;
     var scale = Math.max(sw / fw, sh / fh);
@@ -259,148 +290,29 @@
       rawW: fw, rawH: fh,
     };
   }
-  /* 分析图坐标 → 屏幕坐标。分析图可能是旋转过的，先把点逆旋转回原始帧方向。 */
-  function toScreen(p) {
+  /* 分析图坐标 → 屏幕坐标（分析图可能旋转过，先逆旋转回原始帧） */
+  function toScreen(p, dir) {
     var m = scan.map;
     var x = p.x, y = p.y;
-    if (scan.rotMode === 'cw') {
-      // cw: 分析(x,y) ← 原始(y, rawH-1-x)
-      var cx = y, cy = m.rawH - 1 - x; x = cx; y = cy;
-    } else if (scan.rotMode === 'ccw') {
-      // ccw: 分析(x,y) ← 原始(rawW-1-y, x)
-      var dx = m.rawW - 1 - y, dy = x; x = dx; y = dy;
-    }
+    if (dir === 'cw') { var cx = y, cy = m.rawH - 1 - x; x = cx; y = cy; }
+    else if (dir === 'ccw') { var dx = m.rawW - 1 - y, dy = x; x = dx; y = dy; }
+    else if (dir === '180') { x = m.rawW - 1 - x; y = m.rawH - 1 - y; }
     return { x: (x - m.ox) * m.scale, y: (y - m.oy) * m.scale };
   }
-  function clearOverlay() {
-    if (scan.octx) scan.octx.clearRect(0, 0, scan.ovW, scan.ovH);
-  }
-  function drawQuadPath(ctx, quad) {
-    var pts = [quad.tl, quad.tr, quad.br, quad.bl].map(toScreen);
+  function quadPath(ctx, quad, dir) {
+    var pts = [quad.tl, quad.tr, quad.br, quad.bl].map(function (p) { return toScreen(p, dir); });
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     for (var i = 1; i < 4; i += 1) ctx.lineTo(pts[i].x, pts[i].y);
     ctx.closePath();
+    return pts;
   }
-
-  function tick() {
-    if (scan.busy || scan.locked) return;
-    var now = Date.now();
-    if (now - scan.lastProc < PROCESS_INTERVAL) return;
-    scan.lastProc = now;
-    scan.busy = true;
-    var dbg = '';
-    try {
-      scan.frameN += 1;
-      var raw = grabFrame();
-      if (!raw) { setDbg('等待画面'); return; }
-      // 手机竖持、答题卡横放时画面里的卡是侧着的：尝试 none/cw/ccw 三个方向。
-      // 仅靠 orientationOk 无法区分 cw/ccw（180°对称版面两个都通过），
-      // 因此对每个“可定位”的方向实际读一次，用识别质量打分挑最优：
-      // 学号有效 + 读出的答案数多 + 低对比题少 者为正向。结果记入 rotMode 加速后续帧。
-      var first = scan.rotMode || 'none';
-      var order = [first, 'none', 'cw', 'ccw'];
-      var tried = {};
-      var img = null, quad = null, read = null, best = -1e9, sawAnchors = false;
-      for (var ri = 0; ri < order.length; ri += 1) {
-        var rot = order[ri];
-        if (tried[rot]) continue;
-        tried[rot] = 1;
-        var im = rotateGray(raw, rot);
-        var q = OMR.detectQuad(im);
-        if (!q || !q.anchors) continue;
-        sawAnchors = true;
-        if (!OMR.orientationOk(im, q)) continue;
-        var rd = OMR.readSheet(im, q, { sensitivity: 'normal' });
-        var score = Object.keys(rd.choices).length
-          + (rd.studentNoValid ? 40 : 0)
-          - (rd.quality.lowContrast || 0) * 2;
-        // 已缓存方向给一点优先权，避免相邻帧抖动切换
-        if (rot === scan.rotMode) score += 3;
-        if (score > best) { best = score; img = im; quad = q; read = rd; scan.rotMode = rot; }
-      }
-      dbg = raw.width + 'x' + raw.height + ' 转'
-        + (scan.rotMode === 'cw' ? '顺' : scan.rotMode === 'ccw' ? '逆' : '无')
-        + (quad ? '✓' : (sawAnchors ? ' 卡颠倒' : ' 锚点✗'));
-      if (!img) {
-        scan.needLeave = false; scan.streak = 0; scan.lastSig = '';
-        scan.failN = (scan.failN || 0) + 1;
-        // 连续多帧定位失败时给出更具体的引导（多半是拿太远或有遮挡）
-        setStatus(sawAnchors
-          ? '答题卡方向不对，请让题号正向朝上'
-          : (scan.failN >= 6
-            ? '靠近一点：让答题卡占满画面约三分之二，四角对齐'
-            : '将答题卡放入画面'), sawAnchors ? 'warn' : 'idle');
-        clearOverlay();
-        return;
-      }
-      scan.failN = 0;
-      updateMap(raw.width, raw.height);
-      if (scan.needLeave) {
-        setStatus('当前卡已记录，请先拿开', 'warn');
-        return;
-      }
-      // 一定位到版面就立刻画黑框 + 内部各框（考号框、每题选项框），
-      // 屏幕即时反馈“扫描框”；随后用已读结果高亮涂卡点。
-      drawGuide(quad, img, read);
-      dbg += ' 学号' + (read.studentNoValid ? '✓' : '✗');
-      var sig = read.studentNoValid
-        ? read.studentNo + '#' + Object.keys(read.choices).sort().map(function (k) { return k + read.choices[k]; }).join('')
-        : '';
-      scan.streak = (scan.lastSig && sig === scan.lastSig) ? scan.streak + 1 : 1;
-      scan.lastSig = sig;
-
-      if (read.studentNoValid && scan.streak >= STREAK_NEED) {
-        lockIn(read, quad, img);
-      } else if (read.studentNoValid) {
-        setStatus('识别中，请持稳…', 'busy');
-        drawGuide(quad, img, read);
-      } else {
-        setStatus('未识别到学号，请对准并保持光线均匀', 'warn');
-        drawGuide(quad, img, read);
-      }
-    } catch (e) {
-      dbg = 'ERR ' + ((e && e.message) || e);
-    } finally {
-      scan.busy = false;
-      setDbg('帧' + scan.frameN + ' · ' + dbg);
-    }
-  }
-
-  function drawTrack(quad) {
-    if (!scan.octx) return;
-    var ctx = scan.octx;
-    ctx.clearRect(0, 0, scan.ovW, scan.ovH);
-    drawQuadPath(ctx, quad);
-    ctx.strokeStyle = 'rgba(80, 220, 140, .95)';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-  }
-
-  /* 借鉴参考应用的实时扫描引导：黑框套住答题卡，屏内画出各个内部框
-     ——考号每位方格、每题每个选项小框；定位成功即显示，涂卡点青色高亮。 */
-  function drawGuide(quad, img, read) {
-    if (!scan.octx) return;
-    var ctx = scan.octx;
-    ctx.clearRect(0, 0, scan.ovW, scan.ovH);
-    var quadR = (img && read) ? OMR.refineQuad(img, quad, read.quality.white) : quad;
-    var s = scan.map.scale;
-    var qw = OMR.quadWidth(quadR);
-    var qh = (quadR.bl.y - quadR.tl.y + quadR.br.y - quadR.tr.y) / 2;
-    var M = function (u, v) { return toScreen(OMR.mapPoint(quadR, u, v)); };
-
-    // 1) 黑色外框 + 青色四角角标
-    drawQuadPath(ctx, quadR);
-    ctx.strokeStyle = 'rgba(20, 24, 30, .92)';
-    ctx.lineWidth = 4;
-    ctx.stroke();
-    var corners = [quadR.tl, quadR.tr, quadR.br, quadR.bl].map(toScreen);
-    var arm = Math.max(14, Math.min(corners[1].x - corners[0].x, corners[3].y - corners[0].y) * 0.07);
+  function drawCorners(ctx, pts) {
+    var arm = Math.max(14, Math.min(pts[1].x - pts[0].x, pts[3].y - pts[0].y) * 0.07);
     ctx.strokeStyle = 'rgba(0, 210, 190, .98)';
-    ctx.lineWidth = 4;
-    ctx.lineCap = 'round';
-    corners.forEach(function (p, i) {
-      var nx = corners[(i + 1) % 4], pv = corners[(i + 3) % 4];
+    ctx.lineWidth = 4; ctx.lineCap = 'round';
+    pts.forEach(function (p, i) {
+      var nx = pts[(i + 1) % 4], pv = pts[(i + 3) % 4];
       var dx1 = nx.x - p.x, dy1 = nx.y - p.y, dx2 = pv.x - p.x, dy2 = pv.y - p.y;
       var l1 = Math.hypot(dx1, dy1) || 1, l2 = Math.hypot(dx2, dy2) || 1;
       ctx.beginPath();
@@ -409,10 +321,9 @@
       ctx.lineTo(p.x + dx2 / l2 * arm, p.y + dy2 / l2 * arm);
       ctx.stroke();
     });
-
-    // 2) 内部各框：考号每位小框 + 每题每个选项小框
-    var bw = Math.max(7, TPL.radiusX * qw * s * 2.5);
-    var bh = Math.max(5, TPL.radiusY * qh * s * 2.5);
+  }
+  /* 内部各框：考号每位 + 每题每选项；read 非空时高亮涂卡点 */
+  function drawBoxes(ctx, M, read, bw, bh) {
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(0, 200, 185, .55)';
     var box = function (c) {
@@ -421,8 +332,6 @@
     };
     TPL.studentNo.forEach(function (row) { row.forEach(box); });
     TPL.questions.forEach(function (q) { q.cells.forEach(box); });
-
-    // 3) 已识别涂卡点用青色实心高亮
     if (read && read.choices) {
       ctx.fillStyle = 'rgba(0, 230, 200, .9)';
       TPL.questions.forEach(function (q) {
@@ -447,7 +356,51 @@
     }
   }
 
-  function drawMarks(read, quad, img, result) {
+  /* 空闲取景框：还没识别到卡时也显示，给用户明确的放置目标 */
+  function drawIdleFrame() {
+    if (!scan.octx || !scan.fixedRect) return;
+    var ctx = scan.octx;
+    ctx.clearRect(0, 0, scan.ovW, scan.ovH);
+    var r = scan.fixedRect;
+    // 黑底遮罩，框外压暗
+    ctx.fillStyle = 'rgba(0, 0, 0, .42)';
+    ctx.fillRect(0, 0, scan.ovW, r.y0);
+    ctx.fillRect(0, r.y1, scan.ovW, scan.ovH - r.y1);
+    ctx.fillRect(0, r.y0, r.x0, r.y1 - r.y0);
+    ctx.fillRect(r.x1, r.y0, scan.ovW - r.x1, r.y1 - r.y0);
+    var pts = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (var i = 1; i < 4; i += 1) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(20, 24, 30, .92)'; ctx.lineWidth = 4; ctx.stroke();
+    drawCorners(ctx, pts);
+    // 用固定框的归一化坐标画内部小框
+    var M = function (u, v) { return { x: r.x0 + u * (r.x1 - r.x0), y: r.y0 + v * (r.y1 - r.y0) }; };
+    var bw = Math.max(6, (r.x1 - r.x0) * TPL.radiusX * 2.5);
+    var bh = Math.max(4, (r.y1 - r.y0) * TPL.radiusY * 2.5);
+    drawBoxes(ctx, M, null, bw, bh);
+  }
+
+  /* 已定位：贴着检测到（并精修）的四边形画黑框 + 内部框 */
+  function drawGuide(quad, img, read, dir) {
+    if (!scan.octx || !scan.map) return;
+    var ctx = scan.octx;
+    ctx.clearRect(0, 0, scan.ovW, scan.ovH);
+    var quadR = (img && read) ? OMR.refineQuad(img, quad, read.quality.white) : quad;
+    var pts = quadPath(ctx, quadR, dir);
+    ctx.strokeStyle = 'rgba(20, 24, 30, .92)'; ctx.lineWidth = 4; ctx.stroke();
+    drawCorners(ctx, pts);
+    var qw = OMR.quadWidth(quadR);
+    var qh = (quadR.bl.y - quadR.tl.y + quadR.br.y - quadR.tr.y) / 2;
+    var s = scan.map.scale;
+    var bw = Math.max(7, TPL.radiusX * qw * s * 2.5);
+    var bh = Math.max(5, TPL.radiusY * qh * s * 2.5);
+    var M = function (u, v) { return toScreen(OMR.mapPoint(quadR, u, v), dir); };
+    drawBoxes(ctx, M, read, bw, bh);
+  }
+
+  function drawMarks(read, quad, img, result, dir) {
     if (!scan.octx) return;
     var ctx = scan.octx;
     ctx.clearRect(0, 0, scan.ovW, scan.ovH);
@@ -464,29 +417,109 @@
       var idx = it.mine ? q.options.indexOf(it.mine) : -1;
       if (idx < 0) return;
       var c = q.cells[idx];
-      var p = toScreen(OMR.mapPoint(quadR, c[0], c[1]));
+      var p = toScreen(OMR.mapPoint(quadR, c[0], c[1]), dir);
       ctx.beginPath();
       ctx.ellipse(p.x, p.y, rx, ry, 0, 0, Math.PI * 2);
       ctx.fillStyle = it.ok === 'right' ? 'rgba(70, 200, 120, .45)' : 'rgba(240, 55, 55, .75)';
       ctx.fill();
       if (it.ok === 'wrong') {
-        var first = toScreen(OMR.mapPoint(quadR, q.cells[0][0], q.cells[0][1]));
+        var first = toScreen(OMR.mapPoint(quadR, q.cells[0][0], q.cells[0][1]), dir);
         ctx.fillStyle = 'rgba(240, 55, 55, .95)';
         ctx.font = 'bold 13px sans-serif';
         ctx.textAlign = 'right';
         ctx.fillText(String(q.no), first.x - rx - 4, first.y + 4);
       }
     });
-    drawQuadPath(ctx, quadR);
+    quadPath(ctx, quadR, dir);
     ctx.strokeStyle = 'rgba(30, 30, 30, .9)';
     ctx.lineWidth = 2.5;
     ctx.stroke();
   }
 
-  function lockIn(read, quad, img) {
+  /* 选方向：四方向都跑一遍，用正向地标分 + 答案数 + 学号有效性综合打分 */
+  function analyzeFrame(raw) {
+    var best = null;
+    var dbgParts = [];
+    for (var ri = 0; ri < ROTS.length; ri += 1) {
+      var dir = ROTS[ri];
+      if (scan.rotFilter && dir !== scan.rotFilter) continue;
+      var im = rotateGray(raw, dir);
+      var q = OMR.detectQuad(im);
+      if (!q || !q.anchors) { dbgParts.push(dir + ':✗'); continue; }
+      var up = OMR.uprightScore(im, q);
+      var rd = OMR.readSheet(im, q, { sensitivity: 'normal' });
+      var nAns = Object.keys(rd.choices).length;
+      var score = nAns + (rd.studentNoValid ? 40 : 0) + up * 60 - (rd.quality.lowContrast || 0) * 2;
+      dbgParts.push(dir + ':' + nAns + '/' + up.toFixed(2));
+      // 正向地标分过低的直接淘汰（逆/倒的版面）
+      if (up < UPRIGHT_MIN) continue;
+      if (!best || score > best.score) {
+        best = { dir: dir, img: im, quad: q, read: rd, score: score, up: up, nAns: nAns };
+      }
+    }
+    return { best: best, dbg: dbgParts.join(' ') };
+  }
+
+  function tick() {
+    if (scan.busy || scan.locked) return;
+    var now = Date.now();
+    if (now - scan.lastProc < PROCESS_INTERVAL) return;
+    scan.lastProc = now;
+    scan.busy = true;
+    try {
+      scan.frameN += 1;
+      var raw = grabFrame();
+      if (!raw) { setDbg('等待画面'); return; }
+      updateMap(raw.width, raw.height);
+      var res = analyzeFrame(raw);
+      if (!res.best) {
+        drawIdleFrame();
+        setStatus(scan.frameN > 8 ? '把卡放进黑框，尽量填满并放平' : '把答题卡放入黑框内，对齐四角', 'idle');
+        scan.lastBest = null;
+        setDbg('帧' + scan.frameN + ' · ' + res.dbg);
+        return;
+      }
+      var b = res.best;
+      scan.lastBest = b;
+      drawGuide(b.quad, b.img, b.read, b.dir);
+      var sn = b.read.studentNoValid;
+      // 高质量一帧即锁定：不再要求连续两帧一致（速度提升，且用户不必长时间持稳）
+      var enough = b.nAns >= (TPL.questions.length * 0.55);
+      if (sn && enough && b.up > UPRIGHT_MIN) {
+        lockIn(b.read, b.quad, b.img, b.dir);
+      } else if (sn) {
+        setStatus('识别中：轻按「拍摄识别」可立即确认', 'busy');
+      } else {
+        setStatus('已定位，但学号未读全：点「拍摄识别」重试', 'warn');
+      }
+      setDbg('帧' + scan.frameN + ' · ' + res.dbg + ' →' + b.dir);
+    } catch (e) {
+      setDbg('ERR ' + ((e && e.message) || e));
+    } finally {
+      scan.busy = false;
+    }
+  }
+
+  /* 手动拍摄：用当前最优结果立即确认；若无则用当前帧强制分析一次 */
+  function captureNow() {
+    if (scan.locked) return;
+    var b = scan.lastBest;
+    if (!b) {
+      var raw = grabFrame();
+      if (!raw) { setStatus('相机还没准备好', 'warn'); return; }
+      updateMap(raw.width, raw.height);
+      b = analyzeFrame(raw).best;
+    }
+    if (!b) { setStatus('没找到答题卡：请把卡放进黑框', 'warn'); return; }
+    // 正向地标分低说明方向不对，提示旋转卡片
+    if (b.up < UPRIGHT_MIN) { setStatus('卡片方向颠倒：请旋转卡片后重拍', 'warn'); return; }
+    scan.lastBest = b;
+    drawGuide(b.quad, b.img, b.read, b.dir);
+    lockIn(b.read, b.quad, b.img, b.dir);
+  }
+
+  function lockIn(read, quad, img, dir) {
     scan.locked = true;
-    scan.streak = 0;
-    scan.lastSig = '';
     var result = EXAM.grade(currentExam(), { choices: read.choices, flags: read.flags });
     var saved = saveRecord(read, result);
     var wrong = result.items.filter(function (i) { return i.ok === 'wrong'; }).length;
@@ -499,17 +532,18 @@
     $('rfTag').textContent = '✓ 成绩已记录';
     $('resultFloat').hidden = false;
     setStatus('已记录 ' + result.total + ' 分', 'ok');
-    drawMarks(read, quad, img, result);
+    drawMarks(read, quad, img, result, dir || 'none');
     vibrate();
     speak(name + '，' + result.total + '分');
 
     scan.holdTimer = setTimeout(function () {
       scan.locked = false;
       scan.needLeave = true;
+      scan.lastBest = null;
       $('resultFloat').hidden = true;
       setStatus('请拿开当前卡，放入下一张', 'idle');
-      clearOverlay();
-    }, 5000);
+      drawIdleFrame();
+    }, 4000);
   }
 
   /* ================= 拍照批阅 ================= */
@@ -851,6 +885,7 @@
     $('btnMute').textContent = muted ? '已静音' : '播报开';
     if (muted && window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (e) { /* 忽略 */ } }
   };
+  $('btnCapture').onclick = function () { captureNow(); };
   $('btnAlbum').onclick = function () { $('fileInput').click(); };
   $('fileInput').onchange = function (e) {
     var f = e.target.files && e.target.files[0];
