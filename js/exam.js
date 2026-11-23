@@ -7,37 +7,64 @@
  *   三、完形填空 41-55  A-D 每题 1（PDF 标注 37.5 有误，按 15 分计）
  *   合计 55 题 / 满分 95
  */
-const config = { defaultScores: { listening: 1.5, reading: 2.5, cloze: 1 } };
+const config = { defaultScores: { listening: 1.5, reading: 2.5, cloze: 1, part1: 2, part2: 2.5, part3: 2 } };
 
-const SECTIONS = [
+// 55 题版：听力 1-20(A-C) / 阅读 21-35(A-D) / 七选五 36-40(A-G) / 完形 41-55(A-D)
+const SECTIONS_55 = [
   {
-    key: 'listening',
-    name: '听力',
-    short: '听力',
-    kind: 'choice',
+    key: 'listening', name: '听力', short: '听力', kind: 'choice',
     ranges: [{ from: 1, to: 20, options: 3 }],
-    per: config.defaultScores.listening,
-    full: 30,
+    per: config.defaultScores.listening, full: 30,
   },
   {
-    key: 'reading',
-    name: '阅读理解',
-    short: '阅读',
-    kind: 'choice',
+    key: 'reading', name: '阅读理解', short: '阅读', kind: 'choice',
     ranges: [{ from: 21, to: 35, options: 4 }, { from: 36, to: 40, options: 7 }],
-    per: config.defaultScores.reading,
-    full: 50,
+    per: config.defaultScores.reading, full: 50,
   },
   {
-    key: 'cloze',
-    name: '完形填空',
-    short: '完形',
-    kind: 'choice',
+    key: 'cloze', name: '完形填空', short: '完形', kind: 'choice',
     ranges: [{ from: 41, to: 55, options: 4 }],
-    per: config.defaultScores.cloze,
-    full: 15,
+    per: config.defaultScores.cloze, full: 15,
   },
 ];
+
+// 35 题版：1-15 四选项 / 16-21 七选五(A-G) / 22-35 四选项
+// 按通用答题卡模板（1-15、22-35 为 A-D，16-21 为 A-G）标定。
+const SECTIONS_35 = [
+  {
+    key: 'part1', name: '第一部分', short: '1-15', kind: 'choice',
+    ranges: [{ from: 1, to: 15, options: 4 }],
+    per: config.defaultScores.part1 !== undefined ? config.defaultScores.part1 : 2, full: 30,
+  },
+  {
+    key: 'part2', name: '七选五', short: '16-21', kind: 'choice',
+    ranges: [{ from: 16, to: 21, options: 7 }],
+    per: config.defaultScores.part2 !== undefined ? config.defaultScores.part2 : 2.5, full: 15,
+  },
+  {
+    key: 'part3', name: '第二部分', short: '22-35', kind: 'choice',
+    ranges: [{ from: 22, to: 35, options: 4 }],
+    per: config.defaultScores.part3 !== undefined ? config.defaultScores.part3 : 2, full: 28,
+  },
+];
+
+// 当前题型结构（按 cardType 切换，兼容旧数据默认 55）
+let SECTIONS = SECTIONS_55;
+
+/** 按试卷题量切换题型结构；返回当前 SECTIONS */
+function setCardType(cardType) {
+  SECTIONS = Number(cardType) === 35 ? SECTIONS_35 : SECTIONS_55;
+  return SECTIONS;
+}
+
+function getCardType() {
+  return SECTIONS === SECTIONS_35 ? 35 : 55;
+}
+
+/** 依据题量取对应结构（不改动全局状态，供只读场景使用） */
+function sectionsFor(cardType) {
+  return Number(cardType) === 35 ? SECTIONS_35 : SECTIONS_55;
+}
 
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
 
@@ -75,9 +102,10 @@ function defaultScores() {
   return o;
 }
 
-function fullScore(scores) {
+function fullScore(scores, secs) {
   let total = 0;
-  SECTIONS.forEach((s) => {
+  const list = secs || SECTIONS;
+  list.forEach((s) => {
     const n = s.ranges.reduce((a, r) => a + (r.to - r.from + 1), 0);
     total += n * Number(scores[s.key] || 0);
   });
@@ -90,16 +118,22 @@ function scoreOf(scores, no) {
 }
 
 function createExam(partial) {
+  const p = partial || {};
+  const cardType = p.cardType ? Number(p.cardType) : 55;
+  const secs = sectionsFor(cardType);
+  const def = {};
+  secs.forEach((s) => { def[s.key] = s.per; });
   return Object.assign(
     {
       title: '',
       subject: '英语',
       date: todayStr(),
-      scores: defaultScores(),
+      cardType,
+      scores: def,
       answers: {},
-      fullScore: fullScore(defaultScores()),
+      fullScore: fullScore(def, secs),
     },
-    partial || {}
+    p
   );
 }
 
@@ -116,6 +150,9 @@ function todayStr() {
  * @param read  { choices:{1:'A'}, studentNo, flags:{1:'multi'} }
  */
 function grade(exam, read) {
+  // 按试卷题量切换题型结构（兼容旧数据：无 cardType 视为 55）
+  const cardType = exam && exam.cardType ? exam.cardType : 55;
+  setCardType(cardType);
   const scores = exam.scores || defaultScores();
   const answers = exam.answers || {};
   const items = [];
@@ -179,6 +216,7 @@ function round(v, d) {
 
 /** 全班题目分析：正答率 / 错误率 / 空白率 / 选项分布 */
 function analyse(records, exam) {
+  if (exam && exam.cardType) setCardType(exam.cardType);
   const rows = {};
   choiceNumbers().forEach((no) => {
     rows[no] = { no, sec: sectionOf(no).key, total: 0, right: 0, wrong: 0, blank: 0, dist: {} };
@@ -240,7 +278,12 @@ function analyse(records, exam) {
 }
 
 window.EXAM = {
-  SECTIONS,
+  get SECTIONS() { return SECTIONS; },
+  SECTIONS_55,
+  SECTIONS_35,
+  setCardType,
+  getCardType,
+  sectionsFor,
   LETTERS,
   sectionOf,
   optionsOf,
