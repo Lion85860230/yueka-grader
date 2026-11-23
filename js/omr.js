@@ -425,10 +425,12 @@ function detectByBorder(img) {
   const w = right - left;
   const h = bottom - top;
   const { fw, fh } = frameSize();
-  const expect = fw / fh;         // 设计宽高比（横版约1.38，竖版约0.71）
+  const expect = fw / fh;         // 设计宽高比
   const ratio = w / h;
-  const ok = Math.abs(ratio - expect) / expect < 0.22;
-  if (!ok) return null; // 比例明显不符（如放倒/非卡片），交给投影法兜底
+  // 收紧到 12%：原来 22% 会把深色桌面上的阴影/桌缝（比例 1.9+）误当卡片外框，
+  // 返回一个错误 quad 抢在 detectByPaper 前面命中，导致引导框和采样整体错位。
+  const ok = Math.abs(ratio - expect) / expect < 0.12;
+  if (!ok) return null; // 比例不符，交给纸面/投影法兜底
 
   return {
     tl: { x: left, y: top },
@@ -471,11 +473,20 @@ function detectByPaper(img) {
     for (let y = 0; y < H; y += 2) if (gray[y * W + x] >= thr) c += 1;
     colB[x] = c / Math.ceil(H / 2);
   }
+  // 关键修复：横版卡放在竖屏手机画面中央时，卡片只占画面高度的约 1/4～1/3，
+  // 因此“某列中白纸像素占比”最高也只有 ~0.27。原来的 0.35 固定阈值必然落空，
+  // 导致 detectByPaper 对最典型的“竖持手机扫横版卡”场景完全失效。
+  // 改为自适应阈值：取行/列白占比最大值的 70%（同时设下限，排除纯噪声）。
+  let rowPeak = 0; let colPeak = 0;
+  for (let y = 0; y < H; y += 1) if (rowB[y] > rowPeak) rowPeak = rowB[y];
+  for (let x = 0; x < W; x += 1) if (colB[x] > colPeak) colPeak = colB[x];
+  const rowCut = Math.max(0.22, rowPeak * 0.7);
+  const colCut = Math.max(0.18, colPeak * 0.7);
   const rows = [];
   const cols = [];
-  for (let y = 0; y < H; y += 1) if (rowB[y] >= 0.35) rows.push(y);
-  for (let x = 0; x < W; x += 1) if (colB[x] >= 0.35) cols.push(x);
-  if (rows.length < H * 0.2 || cols.length < W * 0.2) return null;
+  for (let y = 0; y < H; y += 1) if (rowB[y] >= rowCut) rows.push(y);
+  for (let x = 0; x < W; x += 1) if (colB[x] >= colCut) cols.push(x);
+  if (rows.length < H * 0.12 || cols.length < W * 0.12) return null;
   const y0 = rows[0]; const y1 = rows[rows.length - 1];
   const x0 = cols[0]; const x1 = cols[cols.length - 1];
   const ratio = (x1 - x0) / (y1 - y0);
