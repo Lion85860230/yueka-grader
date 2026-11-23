@@ -233,15 +233,44 @@
     return { gray: gray, width: W, height: H };
   }
 
-  /* 屏幕映射：视频 object-fit:cover，帧坐标 → 屏幕坐标 */
+  /* 灰度图旋转 90°：'cw' 顺时针 / 'ccw' 逆时针。
+     手机竖持、答题卡横放（横屏扫描）时，画面里的卡是侧着的，
+     必须旋转回正向才能定位采样。 */
+  function rotateGray(img, dir) {
+    if (dir === 'none') return img;
+    var w = img.width, h = img.height, nw = h, nh = w;
+    var g = new Uint8Array(nw * nh);
+    for (var y = 0; y < nh; y += 1) {
+      for (var x = 0; x < nw; x += 1) {
+        var sx = dir === 'cw' ? y : w - 1 - y;
+        var sy = dir === 'cw' ? h - 1 - x : x;
+        g[y * nw + x] = img.gray[sy * w + sx];
+      }
+    }
+    return { gray: g, width: nw, height: nh };
+  }
+
+  /* 屏幕映射：视频 object-fit:cover，原始帧坐标 → 屏幕坐标 */
   function updateMap(fw, fh) {
     var sw = window.innerWidth, sh = window.innerHeight;
     var scale = Math.max(sw / fw, sh / fh);
-    scan.map = { scale: scale, ox: (fw - sw / scale) / 2, oy: (fh - sh / scale) / 2 };
+    scan.map = {
+      scale: scale, ox: (fw - sw / scale) / 2, oy: (fh - sh / scale) / 2,
+      rawW: fw, rawH: fh,
+    };
   }
+  /* 分析图坐标 → 屏幕坐标。分析图可能是旋转过的，先把点逆旋转回原始帧方向。 */
   function toScreen(p) {
     var m = scan.map;
-    return { x: (p.x - m.ox) * m.scale, y: (p.y - m.oy) * m.scale };
+    var x = p.x, y = p.y;
+    if (scan.rotMode === 'cw') {
+      // cw: 分析(x,y) ← 原始(y, rawH-1-x)
+      var cx = y, cy = m.rawH - 1 - x; x = cx; y = cy;
+    } else if (scan.rotMode === 'ccw') {
+      // ccw: 分析(x,y) ← 原始(rawW-1-y, x)
+      var dx = m.rawW - 1 - y, dy = x; x = dx; y = dy;
+    }
+    return { x: (x - m.ox) * m.scale, y: (y - m.oy) * m.scale };
   }
   function clearOverlay() {
     if (scan.octx) scan.octx.clearRect(0, 0, scan.ovW, scan.ovH);
@@ -263,36 +292,57 @@
     var dbg = '';
     try {
       scan.frameN += 1;
-      var img = grabFrame();
-      if (!img) { setDbg('等待画面'); return; }
-      var quad = OMR.detectQuad(img);
-      dbg = img.width + 'x' + img.height + (quad && quad.anchors ? ' 锚点✓' : ' 锚点✗');
-      if (!quad || !quad.anchors) {
+      var raw = grabFrame();
+      if (!raw) { setDbg('等待画面'); return; }
+      // 手机竖持、答题卡横放时画面里的卡是侧着的：尝试 none/cw/ccw 三个方向。
+      // 仅靠 orientationOk 无法区分 cw/ccw（180°对称版面两个都通过），
+      // 因此对每个“可定位”的方向实际读一次，用识别质量打分挑最优：
+      // 学号有效 + 读出的答案数多 + 低对比题少 者为正向。结果记入 rotMode 加速后续帧。
+      var first = scan.rotMode || 'none';
+      var order = [first, 'none', 'cw', 'ccw'];
+      var tried = {};
+      var img = null, quad = null, read = null, best = -1e9, sawAnchors = false;
+      for (var ri = 0; ri < order.length; ri += 1) {
+        var rot = order[ri];
+        if (tried[rot]) continue;
+        tried[rot] = 1;
+        var im = rotateGray(raw, rot);
+        var q = OMR.detectQuad(im);
+        if (!q || !q.anchors) continue;
+        sawAnchors = true;
+        if (!OMR.orientationOk(im, q)) continue;
+        var rd = OMR.readSheet(im, q, { sensitivity: 'normal' });
+        var score = Object.keys(rd.choices).length
+          + (rd.studentNoValid ? 40 : 0)
+          - (rd.quality.lowContrast || 0) * 2;
+        // 已缓存方向给一点优先权，避免相邻帧抖动切换
+        if (rot === scan.rotMode) score += 3;
+        if (score > best) { best = score; img = im; quad = q; read = rd; scan.rotMode = rot; }
+      }
+      dbg = raw.width + 'x' + raw.height + ' 转'
+        + (scan.rotMode === 'cw' ? '顺' : scan.rotMode === 'ccw' ? '逆' : '无')
+        + (quad ? '✓' : (sawAnchors ? ' 卡颠倒' : ' 锚点✗'));
+      if (!img) {
         scan.needLeave = false; scan.streak = 0; scan.lastSig = '';
         scan.failN = (scan.failN || 0) + 1;
         // 连续多帧定位失败时给出更具体的引导（多半是拿太远或有遮挡）
-        setStatus(scan.failN >= 6
-          ? '靠近一点：让答题卡占满画面约三分之二，避免手指遮挡四角黑块'
-          : '将答题卡放入画面', 'idle');
+        setStatus(sawAnchors
+          ? '答题卡方向不对，请让题号正向朝上'
+          : (scan.failN >= 6
+            ? '靠近一点：让答题卡占满画面约三分之二，四角对齐'
+            : '将答题卡放入画面'), sawAnchors ? 'warn' : 'idle');
         clearOverlay();
         return;
       }
       scan.failN = 0;
-      if (!OMR.orientationOk(img, quad)) {
-        scan.needLeave = false; scan.streak = 0; scan.lastSig = '';
-        setStatus('答题卡放倒了，请旋转 180°', 'warn');
-        clearOverlay();
-        return;
-      }
-      updateMap(img.width, img.height);
+      updateMap(raw.width, raw.height);
       if (scan.needLeave) {
         setStatus('当前卡已记录，请先拿开', 'warn');
         return;
       }
       // 一定位到版面就立刻画黑框 + 内部各框（考号框、每题选项框），
-      // 屏幕即时反馈“扫描框”，无需等学号读出；随后用识别结果高亮涂卡点。
-      drawGuide(quad, img, null);
-      var read = OMR.readSheet(img, quad, { sensitivity: 'normal' });
+      // 屏幕即时反馈“扫描框”；随后用已读结果高亮涂卡点。
+      drawGuide(quad, img, read);
       dbg += ' 学号' + (read.studentNoValid ? '✓' : '✗');
       var sig = read.studentNoValid
         ? read.studentNo + '#' + Object.keys(read.choices).sort().map(function (k) { return k + read.choices[k]; }).join('')
