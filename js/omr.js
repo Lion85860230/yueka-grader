@@ -69,15 +69,35 @@ function loadImage(src, maxSide) {
   });
 }
 
-/** 版面定位块中心在设计画布坐标系中的位置（由 PDF 矢量数据精确提取，单位=设计点） */
-const FRAME_W = 858.0;
-const FRAME_H = 1207.5;
-const ANCHORS = {
-  tl: { x: 0.02622 * FRAME_W, y: -0.00952 * FRAME_H },
-  tr: { x: 0.97436 * FRAME_W, y: -0.00952 * FRAME_H },
-  bl: { x: 0.02622 * FRAME_W, y: 1.01739 * FRAME_H },
-  br: { x: 0.97436 * FRAME_W, y: 1.01739 * FRAME_H },
-};
+/** 版面定位块中心在设计画布坐标系中的位置。
+ *  由当前模板动态派生：模板 anchors 为相对外框的归一化坐标(0~1)，
+ *  乘以模板 frame 的像素尺寸得到设计画布坐标。兼容 55/35 两套模板，
+ *  也兼容旧模板（旧模板没有 anchors 字段时回退到历史硬编码值）。 */
+function frameSize() {
+  const fw = (template.frame && template.frame.w) || 858.0;
+  const fh = (template.frame && template.frame.h) || 1207.5;
+  return { fw, fh };
+}
+
+function anchorsOf() {
+  const { fw, fh } = frameSize();
+  const a = template.anchors;
+  if (a && a.tl && a.tr && a.bl && a.br) {
+    return {
+      tl: { x: a.tl[0] * fw, y: a.tl[1] * fh },
+      tr: { x: a.tr[0] * fw, y: a.tr[1] * fh },
+      bl: { x: a.bl[0] * fw, y: a.bl[1] * fh },
+      br: { x: a.br[0] * fw, y: a.br[1] * fh },
+    };
+  }
+  // 旧模板回退（新教育智能题卡·英语答题卡，角标略在外框外）
+  return {
+    tl: { x: 0.02622 * fw, y: -0.00952 * fh },
+    tr: { x: 0.97436 * fw, y: -0.00952 * fh },
+    bl: { x: 0.02622 * fw, y: 1.01739 * fh },
+    br: { x: 0.97436 * fw, y: 1.01739 * fh },
+  };
+}
 
 /**
  * 方案一：连通域找 4 个实心黑色定位块，再做相似变换（平移+缩放+旋转）。
@@ -167,6 +187,7 @@ function detectByAnchors(img, thr) {
     });
   if (cands.length < 2) return null;
 
+  const ANCHORS = anchorsOf();
   const src4 = [ANCHORS.tl, ANCHORS.tr, ANCHORS.bl, ANCHORS.br];
   let best = null;
   for (let i = 0; i < cands.length - 1; i += 1) {
@@ -189,17 +210,18 @@ function detectByAnchors(img, thr) {
 /** 由 4 个锚点做几何校验 + 6 自由度仿射最小二乘，返回 {err, area, quad} 或 null */
 function fitAffine(img, src4, a) {
   const { gray, width: W, height: H } = img;
-  // 几何校验。
-  // 高度阈值用"高/宽设计比"而非画面高度的固定百分比：设计比例 1207.5/858≈1.41，
-  // 允许透视压缩到 0.85 倍。之前用 dyL ≥ H*0.6（卡片须占画面 60% 高），
-  // 用户手机拿稍远（卡片只占 55% 高）时差 1 个像素也会被拒，导致反复识别失败。
+  // 几何校验：按当前模板的实际宽高比判定，兼容竖版(858x1207)与横版(1609x1166)卡。
+  // designRatio = 设计高/设计宽。照片里 dyL/dxT 应接近该比值（允许透视压缩到 0.7 倍、
+  // 放大到 1.4 倍）。旧代码写死"竖高型"0.85~2.2，会把横版卡(dyL/dxT≈0.72)直接判死。
   const dxT = a.tr.cx - a.tl.cx;
   const dxB = a.br.cx - a.bl.cx;
   const dyL = a.bl.cy - a.tl.cy;
   const dyR = a.br.cy - a.tr.cy;
-  if (dxT < W * 0.5 || dxB < W * 0.5) return null;
-  if (dyL < dxT * 0.85 || dyR < dxT * 0.85) return null;
-  if (dyL > dxT * 2.2 || dyR > dxT * 2.2) return null;
+  const { fw, fh } = frameSize();
+  const designRatio = fh / fw;
+  if (dxT < W * 0.45 || dxB < W * 0.45) return null;
+  if (dyL < dxT * designRatio * 0.7 || dyR < dxT * designRatio * 0.7) return null;
+  if (dyL > dxT * designRatio * 1.5 || dyR > dxT * designRatio * 1.5) return null;
   if (Math.abs(a.tl.cy - a.tr.cy) > H * 0.05) return null;
   if (Math.abs(a.bl.cy - a.br.cy) > H * 0.05) return null;
 
@@ -250,9 +272,9 @@ function fitAffine(img, src4, a) {
   if (err > errMax) return null;
 
   const tl = tf(0, 0);
-  const tr = tf(FRAME_W, 0);
-  const br = tf(FRAME_W, FRAME_H);
-  const bl = tf(0, FRAME_H);
+  const tr = tf(fw, 0);
+  const br = tf(fw, fh);
+  const bl = tf(0, fh);
   const ratio = Math.hypot(tr.x - tl.x, tr.y - tl.y) / Math.hypot(bl.x - tl.x, bl.y - tl.y);
   return {
     err,
@@ -354,9 +376,72 @@ function detectByProjection(img) {
 }
 
 /**
+ * 方案三：外框矩形直线定位（适配 L 形角标 / 细边框答题卡）。
+ * 新版通用答题卡四角是 L 形直角+完整黑色外框，没有实心定位块，
+ * detectByAnchors 会因找不到实心块而失败。此法检测贯穿的水平/垂直外框线，
+ * 四条边求交点得到四角，返回带 anchors 标记的标准 quad。
+ */
+function detectByBorder(img) {
+  const { gray, width: W, height: H } = img;
+  const step = Math.max(1, Math.round(Math.max(W, H) / 600));
+  // 亮度中位数估纸白，取较深的阈值抓黑色外框线
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < gray.length; i += 3) hist[gray[i]] += 1;
+  let acc = 0; let total = 0; let median = 128;
+  for (let i = 0; i < 256; i += 1) total += hist[i];
+  for (let i = 0; i < 256; i += 1) { acc += hist[i]; if (acc >= total * 0.7) { median = i; break; } }
+  const thr = Math.max(60, Math.min(150, Math.round(median * 0.62)));
+
+  // 每行/每列统计黑像素数（归一化到采样数）
+  const rowN = new Float32Array(H);
+  const colN = new Float32Array(W);
+  const sampX = Math.ceil(W / step);
+  const sampY = Math.ceil(H / step);
+  for (let y = 0; y < H; y += 1) {
+    let c = 0;
+    for (let x = 0; x < W; x += step) if (gray[y * W + x] < thr) c += 1;
+    rowN[y] = c / sampX;
+  }
+  for (let x = 0; x < W; x += 1) {
+    let c = 0;
+    for (let y = 0; y < H; y += step) if (gray[y * W + x] < thr) c += 1;
+    colN[x] = c / sampY;
+  }
+  // 外框线是"很长很直"的线：连续多行/多列黑比例高。
+  // 取最外侧满足阈值的行/列作为四条边。
+  const lineThr = 0.5; // 该行/列过半采样点为黑
+  let top = -1, bottom = -1, left = -1, right = -1;
+  for (let y = 0; y < H; y += 1) { if (rowN[y] >= lineThr) { top = y; break; } }
+  for (let y = H - 1; y >= 0; y -= 1) { if (rowN[y] >= lineThr) { bottom = y; break; } }
+  for (let x = 0; x < W; x += 1) { if (colN[x] >= lineThr) { left = x; break; } }
+  for (let x = W - 1; x >= 0; x -= 1) { if (colN[x] >= lineThr) { right = x; break; } }
+  if (top < 0 || bottom <= top || left < 0 || right <= left) return null;
+
+  const w = right - left;
+  const h = bottom - top;
+  const { fw, fh } = frameSize();
+  const expect = fw / fh;         // 设计宽高比（横版约1.38，竖版约0.71）
+  const ratio = w / h;
+  const ok = Math.abs(ratio - expect) / expect < 0.22;
+  if (!ok) return null; // 比例明显不符（如放倒/非卡片），交给投影法兜底
+
+  return {
+    tl: { x: left, y: top },
+    tr: { x: right, y: top },
+    br: { x: right, y: bottom },
+    bl: { x: left, y: bottom },
+    ok: true,
+    ratio,
+    anchors: true,   // 视为可靠定位，供 UI 判定
+    border: true,
+  };
+}
+
+/**
  * 版面外框检测总入口：
- *  1. 优先用四角实心定位块 + 相似变换（精准、抗光照、可纠轻微旋转）
- *  2. 失败时回退到行/列投影法（兼容打印偏移的卡样）
+ *  1. 四角实心定位块 + 相似变换（旧卡，精准）
+ *  2. 外框矩形直线（新版 L 形角标卡）
+ *  3. 行/列投影法（兜底）
  */
 function detectQuad(img) {
   const { gray, width: W, height: H } = img;
@@ -383,6 +468,9 @@ function detectQuad(img) {
     const byAnchor = detectByAnchors(img, t);
     if (byAnchor) return byAnchor;
   }
+  // 新版 L 形角标卡：外框矩形直线定位
+  const byBorder = detectByBorder(img);
+  if (byBorder) return byBorder;
   const byProj = detectByProjection(img);
   if (byProj) return byProj;
   return null;
